@@ -2,7 +2,7 @@
 
 HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using FFmpeg and Avisynth+ filtering to improve compression, compares the size of the re-encoded file to the original, and retains the smaller version. It tracks processed files using a SQLite database. Designed for use in Git Bash on Windows, this script automates video optimization while preserving quality and reducing file sizes.
 
-**NOTE** THIS SCRIPT DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you can live with the occasional mistake. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
+**NOTE** THIS SCRIPT IS UNFORGIVING AND DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you can live with the occasional mistake. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
 
 ## Features
 
@@ -71,7 +71,7 @@ These parameters can be adjusted in the script's configuration section at the to
 
 ## Assumptions About the User's System
 
-- **Operating Environment:** The script is intended for use in Git Bash on Windows.
+- **Operating Environment:** The script is intended for use in Git Bash on Windows. If you want to run it on a *nix system, it may require some path modifications. Qaac and AVS will need to run in a wine environment, or you can modify the script to use ffmpeg's built-in AAC encoder. If you're running *nix, I assume you know how to do these things.
 - **Executable PATH:** The following binaries must be in your system's PATH:
   - `ffmpeg` and `ffprobe` (with Avisynth+ support, as provided by Media Autobuild Suite)
   - `sqlite3`
@@ -93,11 +93,11 @@ These parameters can be adjusted in the script's configuration section at the to
 5. Error Logging:
    Errors encountered during processing are logged to error.log. Review this file for troubleshooting.
 
-Contributing
-Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! 
+## Contributing
+Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. 
 
-License
+## License
 This project is licensed under the GNU General Public License v2 (GPL-2.0). See GPL-2.0 License for details.
 
-Disclaimer
+## Disclaimer
 HEVC-Shrinker is provided as-is, without any warranty. Use at your own risk. It is recommended to test the script on sample files before processing important data.
