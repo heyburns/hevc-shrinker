@@ -1,2 +1,85 @@
-# hevc-shrinker
-HEVC-Shrinker is a Bash script that re-encodes video files to  x265 with Avisynth+ filtering for better compression, compares the size of the re-encoded file to the original, and retains the smaller version. 
+# HEVC-Shrinker
+
+HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using FFmpeg and Avisynth+ filtering to improve compression, compares the size of the re-encoded file to the original, and retains the smaller version. It tracks processed files using a SQLite database. Designed for use in Git Bash on Windows, this script automates video optimization while preserving quality and reducing file sizes.
+
+**NOTE** THIS SCRIPT DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you don't mind the occasional mistake, like non-square DAR. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
+
+## Features
+
+- **Recursive File Processing:** Scans directories for common video formats.
+- **Video Re-encoding:** Uses FFmpeg with Avisynth+ filtering to re-encode video to HEVC.  
+  - For most file types, the script loads video and audio separately and then combines them with `AudioDub()`.  
+  - **WMV Files:** Due to A/V sync issues with the standard method, WMV files are loaded using `DirectShowSource("file.ext")` in a single step (which automatically loads both video and audio). This bypasses the need for stream identifiers.
+- **Audio Processing:**  
+  - If the audio is already AAC, it is copied directly.  
+  - Otherwise, audio is re-encoded using QAAC.
+- **Cover Art Detection:**  
+  The script searches for cover art in the same directory as the video file. It first checks for a file named `poster.jpg`, `poster.png`, or `poster.webp`. If none is found, it then looks for an image file with the same base name as the video (e.g., for `video.mp4`, it looks for `video.jpg`, `video.png`, or `video.webp`).
+- **Muxing:** Combines the processed video, audio, and optional cover art into an MKV container.
+- **Size Comparison:**  
+  For non-WMV files, after muxing the original file is remuxed to MKV for a fair size comparison—the smaller file is kept.  
+  For WMV files, size comparison is skipped and the HEVC output is always used (due to incompatibility of WMV with Matroska containers).
+- **Error Logging:** Logs errors to `error.log` and continues processing subsequent files.
+- **Database Tracking:** Uses SQLite to record processed files, ensuring that files are not re-processed.
+
+## Dependencies
+
+### Avisynth+
+
+The script leverages Avisynth+ for pre-filtering via several plug-ins:
+  [Avisynth+ 64-bit [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)]
+- [LSMASHSource] (http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
+- [DirectShowSource](http://avisynth.nl/index.php/DirectShowSource) Used to load WMV files in a single step (which avoids A/V sync issues).
+  http://avisynth.nl/index.php/DirectShowSource
+- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressability considerably.  
+  https://forum.doom9.org/showthread.php?t=176245
+
+Ensure Avisynth+ is installed and correctly configured.  
+
+
+### FFmpeg
+
+A recent build of FFmpeg (compiled with Avisynth+ support) is required. Both `ffmpeg` and `ffprobe` must be in your system's PATH. For a user-friendly build, we recommend using **Media Autobuild Suite**.  
+- **Media Autobuild Suite:** [Media Autobuild Suite on GitHub](https://github.com/m-ab-s/media-autobuild_suite)
+
+### QAAC
+
+QAAC is used for audio re-encoding when AAC is not present. **Note:** QAAC requires iTunes to be installed on Windows (unless you find an alternative method).  
+- **QAAC Download:** [QAAC GitHub Repository](https://github.com/nu774/qaac)
+
+### SQLite3
+
+SQLite3 is used to track processed files via a local database.  
+- **SQLite3 Download:** [SQLite Download Page](https://www.sqlite.org/download.html)
+
+## Configuration & Adjustments
+
+- **x265 Encoding Quality (CRF):**  
+  - **Default Value:** `23`  
+  - Increase the CRF value to further compress the video (resulting in a smaller file at the expense of quality).
+  
+- **QAAC Audio Quality:**  
+  - **Default QAAC VBR Setting:** `100`  
+  - Lower the QAAC VBR value to increase audio compression (which may reduce audio quality).
+
+These parameters can be adjusted in the script's configuration section at the top.
+
+## Assumptions About the User's System
+
+- **Operating Environment:** The script is intended for use in Git Bash on Windows.
+- **Executable PATH:** The following binaries must be in your system's PATH:
+  - `ffmpeg` and `ffprobe` (with Avisynth+ support, as provided by Media Autobuild Suite)
+  - `sqlite3`
+  - `qaac` (note: requires iTunes)
+- **Installed Software:**  
+  - Avisynth+ (with necessary functions like LWLibavSource, DirectShowSource, and LRemoveDust) must be installed.
+  - A modern version of Bash is recommended.
+
+## Usage
+
+1. **Download and Setup:**  
+   Clone this repository or download the script (e.g., `hevc-shrinker.sh`) into the directory containing your video files.
+2. **Make Executable:**  
+   Ensure the script is executable:
+   ```bash
+   chmod +x hevc-shrinker.sh
