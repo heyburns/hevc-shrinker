@@ -2,7 +2,7 @@
 
 HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using FFmpeg and Avisynth+ filtering to improve compression, compares the size of the re-encoded file to the original, and retains the smaller version. It tracks processed files using a SQLite database. Designed for use in Git Bash on Windows, this script automates video optimization while preserving quality and reducing file sizes.
 
-**NOTE** THIS SCRIPT DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you don't mind the occasional mistake, like non-square DAR. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
+**NOTE** THIS SCRIPT DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you can live with the occasional mistake. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
 
 ## Features
 
@@ -26,37 +26,42 @@ HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using
 
 ### Avisynth+
 
+Ensure Avisynth+ is installed and correctly configured. 
+
 The script leverages Avisynth+ for pre-filtering via several plug-ins:
-  [Avisynth+ 64-bit [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)]
-- [LSMASHSource] (http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
+
+  [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)
+- [LSMASHSource](http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
 - [DirectShowSource](http://avisynth.nl/index.php/DirectShowSource) Used to load WMV files in a single step (which avoids A/V sync issues).
-  http://avisynth.nl/index.php/DirectShowSource
-- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressability considerably.  
-  https://forum.doom9.org/showthread.php?t=176245
-
-Ensure Avisynth+ is installed and correctly configured.  
-
+- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressability considerably.
 
 ### FFmpeg
-
-A recent build of FFmpeg (compiled with Avisynth+ support) is required. Both `ffmpeg` and `ffprobe` must be in your system's PATH. For a user-friendly build, we recommend using **Media Autobuild Suite**.  
-- **Media Autobuild Suite:** [Media Autobuild Suite on GitHub](https://github.com/m-ab-s/media-autobuild_suite)
+- **Purpose:** Performs video and audio encoding/decoding, muxing, and remuxing.
+- **Recommended Build:** Media Autobuild Suite (a user-friendly FFmpeg build with Avisynth+ support).
+- **Download:** [Media Autobuild Suite on GitHub](https://github.com/m-ab-s/media-autobuild_suite)
 
 ### QAAC
-
-QAAC is used for audio re-encoding when AAC is not present. **Note:** QAAC requires iTunes to be installed on Windows (unless you find an alternative method).  
-- **QAAC Download:** [QAAC GitHub Repository](https://github.com/nu774/qaac)
+- **Purpose:** Re-encodes audio to AAC when needed.
+- **Note:** QAAC requires iTunes to be installed on Windows unless an alternative is available.
+- **Download:** [QAAC GitHub Repository](https://github.com/nu774/qaac)
 
 ### SQLite3
+- **Purpose:** Tracks processed files using a local SQLite database.
+- **Download:** [SQLite Download Page](https://www.sqlite.org/download.html)
 
-SQLite3 is used to track processed files via a local database.  
-- **SQLite3 Download:** [SQLite Download Page](https://www.sqlite.org/download.html)
+### MKVToolNix
+- **Purpose:** Used for advanced MKV container operations (if needed in the workflow).
+- **Download:** [MKVToolNix Official Site](https://mkvtoolnix.download/)
+
+### Git for Windows
+- **Purpose:** Provides a Git Bash environment required to run this script.
+- **Download:** [Git for Windows](https://gitforwindows.org/)
 
 ## Configuration & Adjustments
 
 - **x265 Encoding Quality (CRF):**  
   - **Default Value:** `23`  
-  - Increase the CRF value to further compress the video (resulting in a smaller file at the expense of quality).
+  - Increase the CRF value to further compress the video (resulting in a smaller file at the expense of quality). I wouldn't go higher than 28 unless you really don't care about quality.
   
 - **QAAC Audio Quality:**  
   - **Default QAAC VBR Setting:** `100`  
@@ -71,15 +76,28 @@ These parameters can be adjusted in the script's configuration section at the to
   - `ffmpeg` and `ffprobe` (with Avisynth+ support, as provided by Media Autobuild Suite)
   - `sqlite3`
   - `qaac` (note: requires iTunes)
-- **Installed Software:**  
-  - Avisynth+ (with necessary functions like LWLibavSource, DirectShowSource, and LRemoveDust) must be installed.
-  - A modern version of Bash is recommended.
+  - `mkvmerge`
 
 ## Usage
 
 1. **Download and Setup:**  
    Clone this repository or download the script (e.g., `hevc-shrinker.sh`) into the directory containing your video files.
 2. **Make Executable:**  
-   Ensure the script is executable:
+   Ensure the script is executable (only for *nix filesystems):
    ```bash
    chmod +x hevc-shrinker.sh
+3. Run the Script:
+   Open Git Bash, navigate to the directory, and run:
+   ```bash
+   ./hevc-shrinker.sh
+5. Error Logging:
+   Errors encountered during processing are logged to error.log. Review this file for troubleshooting.
+
+Contributing
+Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! 
+
+License
+This project is licensed under the GNU General Public License v2 (GPL-2.0). See GPL-2.0 License for details.
+
+Disclaimer
+HEVC-Shrinker is provided as-is, without any warranty. Use at your own risk. It is recommended to test the script on sample files before processing important data.
