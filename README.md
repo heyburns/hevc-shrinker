@@ -34,7 +34,7 @@ The script leverages Avisynth+ for pre-filtering via several plug-ins:
   [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)
 - [LSMASHSource](http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
 - [DirectShowSource](http://avisynth.nl/index.php/DirectShowSource) Used to load WMV files in a single step (which avoids A/V sync issues).
-- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressibility substantially.
+- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to very fine detail but improves compressibility substantially.
 
 ### FFmpeg
 - **Purpose:** Performs video and audio encoding/decoding, muxing, and remuxing.
