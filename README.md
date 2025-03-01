@@ -83,9 +83,9 @@ These parameters can be adjusted in the script's configuration section at the to
 
 1. **Download and Setup:**  
    Clone this repository or download the script (e.g., `hevc-shrinker.sh`) into the directory containing your video files.
-   Copy LRemoveDust.avsi, LimitChange.avsi, masktools2.dll, RemoveGrainHD.dll, and RGTools.dll to your AVISynth plugins directory (typically C:\Program Files (x86)\AviSynth+\plugins64+)
+   Copy LRemoveDust.avsi, LimitChange.avsi, DirectShowSource.dll, LSMASHSource.dll, masktools2.dll, RemoveGrainHD.dll, and RGTools.dll to your AVISynth plugins directory (typically C:\Program Files (x86)\AviSynth+\plugins64+)
 3. **Make Executable:**  
-   Ensure the script is executable (only for *nix filesystems):
+   Ensure the script is executable (only for *nix filesystems, skip if you are on Windows):
    ```bash
    chmod +x hevc-shrinker.sh
 4. Run the Script:
@@ -96,7 +96,7 @@ These parameters can be adjusted in the script's configuration section at the to
    Errors encountered during processing are logged to error.log. Review this file for troubleshooting.
 
 ## Contributing
-Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. 
+Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. I provide this script as a courtesy only.
 
 ## License
 This project is licensed under the GNU General Public License v2 (GPL-2.0). See GPL-2.0 License for details.
