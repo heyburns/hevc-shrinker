@@ -10,6 +10,7 @@ HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using
 - **Video Re-encoding:** Uses FFmpeg with Avisynth+ filtering to re-encode video to HEVC.  
   - For most file types, the script loads video and audio separately and then combines them with `AudioDub()`.  
   - **WMV Files:** Due to A/V sync issues with the standard method, WMV files are loaded using `DirectShowSource("file.ext")` in a single step (which automatically loads both video and audio). This bypasses the need for stream identifiers.
+  - If videos are UHD they are downscaled to 1080. If they are high frame rate (i.e., 50 or 60fps) the frame rate is halved - frame rate has minimal effect on file size but encoding speed is doubled with minimal visual difference.
 - **Audio Processing:**  
   - If the audio is already AAC, it is copied directly.  
   - Otherwise, audio is re-encoded using QAAC.
@@ -33,7 +34,7 @@ The script leverages Avisynth+ for pre-filtering via several plug-ins:
   [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)
 - [LSMASHSource](http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
 - [DirectShowSource](http://avisynth.nl/index.php/DirectShowSource) Used to load WMV files in a single step (which avoids A/V sync issues).
-- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressability considerably.
+- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to very fine detail but improves compressibility substantially.
 
 ### FFmpeg
 - **Purpose:** Performs video and audio encoding/decoding, muxing, and remuxing.
@@ -82,11 +83,12 @@ These parameters can be adjusted in the script's configuration section at the to
 
 1. **Download and Setup:**  
    Clone this repository or download the script (e.g., `hevc-shrinker.sh`) into the directory containing your video files.
-2. **Make Executable:**  
-   Ensure the script is executable (only for *nix filesystems):
+   Copy LRemoveDust.avsi, LimitChange.avsi, DirectShowSource.dll, LSMASHSource.dll, masktools2.dll, RemoveGrainHD.dll, and RGTools.dll to your AVISynth plugins directory (typically C:\Program Files (x86)\AviSynth+\plugins64+)
+3. **Make Executable:**  
+   Ensure the script is executable (only for *nix filesystems, skip if you are on Windows):
    ```bash
    chmod +x hevc-shrinker.sh
-3. Run the Script:
+4. Run the Script:
    Open Git Bash, navigate to the directory, and run:
    ```bash
    ./hevc-shrinker.sh
@@ -94,7 +96,7 @@ These parameters can be adjusted in the script's configuration section at the to
    Errors encountered during processing are logged to error.log. Review this file for troubleshooting.
 
 ## Contributing
-Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. 
+Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. I provide this script as a courtesy only.
 
 ## License
 This project is licensed under the GNU General Public License v2 (GPL-2.0). See GPL-2.0 License for details.
