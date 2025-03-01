@@ -10,6 +10,7 @@ HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using
 - **Video Re-encoding:** Uses FFmpeg with Avisynth+ filtering to re-encode video to HEVC.  
   - For most file types, the script loads video and audio separately and then combines them with `AudioDub()`.  
   - **WMV Files:** Due to A/V sync issues with the standard method, WMV files are loaded using `DirectShowSource("file.ext")` in a single step (which automatically loads both video and audio). This bypasses the need for stream identifiers.
+  - If videos are UHD, they are downscaled to 1080. If they are high frame rate (i.e., 50 or 60fps) the frame rate is halved - frame rate does not really affect file size much at all, but encoding speed is doubled with minimal visual difference.
 - **Audio Processing:**  
   - If the audio is already AAC, it is copied directly.  
   - Otherwise, audio is re-encoded using QAAC.
