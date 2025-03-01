@@ -15,7 +15,7 @@ HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using
   - If the audio is already AAC, it is copied directly.  
   - Otherwise, audio is re-encoded using QAAC.
 - **Cover Art Detection:**  
-  The script searches for cover art in the same directory as the video file. It first checks for a file named `poster.jpg`, `poster.png`, or `poster.webp`. If none is found, it then looks for an image file with the same base name as the video (e.g., for `video.mp4`, it looks for `video.jpg`, `video.png`, or `video.webp`).
+  The script searches for cover art in the same directory as the video file. It first checks for a file named `poster.jpg`, `poster.png`, or `poster.webp`. If none is found, it then looks for an image file with the same base name as the video (e.g., for `video.jpg`, and it looks for `video-poster.jpg`.
 - **Muxing:** Combines the processed video, audio, and optional cover art into an MKV container.
 - **Size Comparison:**  
   For non-WMV files, after muxing the original file is remuxed to MKV for a fair size comparison—the smaller file is kept.  
