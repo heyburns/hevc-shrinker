@@ -7,12 +7,12 @@ set -o pipefail
 # Configuration
 ##########################################
 
-# Recognized video extensions (case-insensitive)
-VIDEO_EXT_REGEX=".*\.\(mp4\|mkv\|wmv\|avi\|mov\|flv\|mpeg\|mpg\)$"
+# Recognized video extensions (case-insensitive), including .m4v
+VIDEO_EXT_REGEX=".*\.\(mp4\|mkv\|wmv\|avi\|mov\|flv\|mpeg\|mpg\|m4v\)$"
 
 # x265 Options
 X265_TUNE="grain"         # --tune grain
-X265_CRF=23               # --crf 23  (Increase this value for higher compression, at the cost of quality)
+X265_CRF=23               # --crf 23  (Increase for higher compression at the expense of quality)
 X265_PROFILE="main10"     # --profile main10
 X265_NO_SAO=1             # --no-sao => no-sao=1
 X265_SEL_SAO=0            # --selective-sao=0
@@ -35,7 +35,7 @@ fi
 # Helper Functions
 ##########################################
 
-# Checks if the first video track is x265 (HEVC) AND the first audio track is AAC.
+# Check if the first video track is H.265 (HEVC) AND the first audio track is AAC.
 is_already_x265_aac() {
   local file="$1"
   local video_codec audio_codec
@@ -57,7 +57,7 @@ is_already_x265_aac() {
   fi
 }
 
-# Return "copy" if video is x265, otherwise "libx265".
+# Return "copy" if video is H.265, otherwise "libx265".
 decide_video_codec() {
   local file="$1"
   local vcodec
@@ -97,7 +97,6 @@ x265_params() {
 # SQLite helper: Check if a file has been processed.
 has_been_processed() {
   local filepath="$1"
-  # Escape any single quotes.
   local esc_filepath="${filepath//\'/\'\'}"
   local count
   count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM processed_files WHERE filepath = '$esc_filepath';")
@@ -130,7 +129,7 @@ remux_to_mkv() {
 # Main Script
 ##########################################
 
-# Find all recognized video files (recursively).
+# Process each video file found recursively.
 mapfile -d '' all_files < <(find . -type f -iregex "$VIDEO_EXT_REGEX" -print0)
 
 for file in "${all_files[@]}"; do
@@ -143,16 +142,21 @@ for file in "${all_files[@]}"; do
   fi
 
   # Determine directory, base filename, and extension.
-  dir="$(dirname "$file")"
+  file_dir="$(dirname "$file")"
   base_name="$(basename "$file")"
   base_noext="${base_name%.*}"
   ext_lower=$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')
 
-  # Get video dimensions using ffprobe.
+  # Gather video dimensions and average frame rate.
   orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file")
   orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$file")
+  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
+            -of default=noprint_wrappers=1:nokey=1 "$file")
+  fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
+  bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
+
+  # Determine if the file needs to be resized (vertical resolution > 1080).
   if [ "$orig_height" -gt 1080 ]; then
-    # Compute scale factor and new width.
     scale_factor=$(awk "BEGIN {printf \"%.4f\", 1080 / $orig_height}")
     new_width=$(awk "BEGIN {w=int($orig_width * $scale_factor); if (w % 2 != 0) w--; print w}")
     resize_line="Lanczos4Resize(${new_width},1080)"
@@ -160,17 +164,46 @@ for file in "${all_files[@]}"; do
     resize_line=""
   fi
 
-  # Get the average frame rate as a fraction from ffprobe.
-  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
-            -of default=noprint_wrappers=1:nokey=1 "$file")
-  fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
-  # Use awk to check if fps is >= 50.
-  bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
+  # Determine if the file is bobbed (frame rate ≥ 50 fps).
   if [ "$bobbed" -eq 1 ]; then
     select_even_line="SelectEven()"
   else
     select_even_line=""
   fi
+
+  # Decide whether to skip processing.
+  # Skip only if the file is already H.265 + AAC AND its height is ≤1080 AND its frame rate is below 50 fps.
+  if is_already_x265_aac "$file"; then
+    if [ "$orig_height" -le 1080 ] && [ "$bobbed" -eq 0 ]; then
+      if [ "$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')" != "mkv" ]; then
+        echo "  File is already H.265 + AAC with acceptable resolution and frame rate but not in MKV. Remuxing..."
+        final_out="${file_dir}/${base_noext}.mkv"
+        remux_to_mkv "$file" "$final_out"
+        if [ $? -ne 0 ]; then
+          echo "  [ERROR] Remuxing failed for $file" >> error.log
+          continue
+        fi
+        rm -f "$file"
+      else
+        echo "  File is already H.265 + AAC with acceptable resolution and frame rate in MKV. Skipping processing."
+        final_out="$file"
+      fi
+      NEW_HASH=$(sha1sum "$final_out" | awk '{print $1}')
+      mark_as_processed "$final_out" "$NEW_HASH"
+      rm -f "${file}.lwi"
+      echo "============================================"
+      continue
+    else
+      echo "  File is already H.265 + AAC but does not meet resolution/frame rate requirements. Forcing re-encoding."
+      want_video="libx265"
+      want_audio="copy"  # Copy audio if already AAC.
+    fi
+  else
+    want_video=$(decide_video_codec "$file")
+    want_audio=$(decide_audio_codec "$file")
+  fi
+
+  echo "  Processing file: $(basename "$file")"
 
   # Flag if file is WMV.
   if [[ "$ext_lower" == "wmv" ]]; then
@@ -180,46 +213,18 @@ for file in "${all_files[@]}"; do
     is_wmv=0
   fi
 
-  # Define the final output filename (always .mkv).
-  final_out="${dir}/${base_noext}.mkv"
-
-  ##############################
-  # Process files already in x265+aac:
-  ##############################
-  if is_already_x265_aac "$file"; then
-    if [ "$ext_lower" != "mkv" ]; then
-      echo "  File is already x265 + AAC but not in MKV container. Remuxing to MKV..."
-      remux_to_mkv "$file" "$final_out"
-      if [ $? -ne 0 ]; then
-        echo "  [ERROR] Remuxing failed for $file" >> error.log
-        continue
-      fi
-      rm -f "$file"
-    else
-      echo "  File is already x265 + AAC in MKV container. Using existing file."
-      final_out="$file"
-    fi
-    NEW_HASH=$(sha1sum "$final_out" | awk '{print $1}')
-    mark_as_processed "$final_out" "$NEW_HASH"
-    rm -f "${file}.lwi"
-    echo "============================================"
-    continue
-  fi
-
-  echo "  Processing file: $base_name"
+  # Define the final output filename.
+  final_out="${file_dir}/${base_noext}.mkv"
 
   ##############################
   # Re-encoding process:
   ##############################
-  want_video=$(decide_video_codec "$file")  # "libx265" or "copy"
-  want_audio=$(decide_audio_codec "$file")    # "qaac" or "copy"
-
-  tmp_video="${dir}/${base_noext}.tmpvideo.mkv"
-  tmp_audio="${dir}/${base_noext}.tmpaudio.m4a"
+  tmp_video="${file_dir}/${base_noext}.tmpvideo.mkv"
+  tmp_audio="${file_dir}/${base_noext}.tmpaudio.m4a"
 
   # --- VIDEO PROCESSING ---
   if [[ "$want_video" == "copy" ]]; then
-    echo "  Video already in x265. Copying video track..."
+    echo "  Video already in H.265. Copying video track..."
     ffmpeg -y -hide_banner -loglevel error -i "$file" -an -c:v copy "$tmp_video"
     if [ $? -ne 0 ]; then
       echo "  [ERROR] Failed to extract video track from $file" >> error.log
@@ -228,41 +233,31 @@ for file in "${all_files[@]}"; do
       continue
     fi
   else
+    tmp_avs="${file_dir}/${base_noext}.tmp.avs"
     if [[ $is_wmv -eq 1 ]]; then
-      echo "  Re-encoding WMV file to x265 using DirectShowSource..."
-      tmp_avs="${dir}/${base_noext}.tmp.avs"
+      echo "  Re-encoding WMV file to H.265 using DirectShowSource..."
       {
         echo "video=DirectShowSource(\"$file\")"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
-        if [ -n "$resize_line" ]; then
-          echo "$resize_line"
-        fi
-        if [ -n "$select_even_line" ]; then
-          echo "$select_even_line"
-        fi
+        if [ -n "$resize_line" ]; then echo "$resize_line"; fi
+        if [ -n "$select_even_line" ]; then echo "$select_even_line"; fi
         echo "LRemoveDust(17,4)"
         echo "Prefetch(12)"
       } > "$tmp_avs"
     else
-      echo "  Re-encoding video to x265 using Avisynth+ filter chain..."
-      tmp_avs="${dir}/${base_noext}.tmp.avs"
+      echo "  Re-encoding video to H.265 using Avisynth+ filter chain..."
       {
         echo "video=LWLibavVideoSource(\"$file\")"
         echo "audio=LWLibavAudioSource(\"$file\",stream_index=1)"
         echo "AudioDub(video,audio)"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
-        if [ -n "$resize_line" ]; then
-          echo "$resize_line"
-        fi
-        if [ -n "$select_even_line" ]; then
-          echo "$select_even_line"
-        fi
+        if [ -n "$resize_line" ]; then echo "$resize_line"; fi
+        if [ -n "$select_even_line" ]; then echo "$select_even_line"; fi
         echo "LRemoveDust(17,4)"
         echo "Prefetch(12)"
       } > "$tmp_avs"
-      # For non-WMV files, get the original file size for later comparison.
       orig_size=$(stat -c%s "$file")
     fi
 
@@ -278,9 +273,9 @@ for file in "${all_files[@]}"; do
     rm -f "$tmp_avs"
     if [ $ret -ne 0 ]; then
       if [[ $is_wmv -eq 1 ]]; then
-        echo "  [ERROR] x265 encoding via Avisynth+ failed for WMV file: $file" >> error.log
+        echo "  [ERROR] H.265 encoding via Avisynth+ failed for WMV file: $file" >> error.log
       else
-        echo "  [ERROR] x265 encoding via Avisynth+ failed for file: $file" >> error.log
+        echo "  [ERROR] H.265 encoding via Avisynth+ failed for file: $file" >> error.log
       fi
       rm -f "$tmp_video"
       rm -f "${file}.lwi"
@@ -292,17 +287,17 @@ for file in "${all_files[@]}"; do
   audio_extracted=""
   if [[ "$want_audio" == "copy" ]]; then
     echo "  Audio already AAC. Copying audio track..."
-    ffmpeg -y -hide_banner -loglevel error -i "$file" -vn -c:a copy "${dir}/${base_noext}.tmpaudio.aac"
+    ffmpeg -y -hide_banner -loglevel error -i "$file" -vn -c:a copy "${file_dir}/${base_noext}.tmpaudio.aac"
     if [ $? -ne 0 ]; then
       echo "  [ERROR] Failed to extract AAC track from $file" >> error.log
-      rm -f "$tmp_video" "${dir}/${base_noext}.tmpaudio.aac"
+      rm -f "$tmp_video" "${file_dir}/${base_noext}.tmpaudio.aac"
       rm -f "${file}.lwi"
       continue
     fi
-    audio_extracted="${dir}/${base_noext}.tmpaudio.aac"
+    audio_extracted="${file_dir}/${base_noext}.tmpaudio.aac"
   else
     echo "  Re-encoding audio to AAC (QAAC VBR 100)..."
-    wav_file="${dir}/${base_noext}.tmpaudio.wav"
+    wav_file="${file_dir}/${base_noext}.tmpaudio.wav"
     ffmpeg -y -hide_banner -loglevel error -i "$file" -vn -acodec pcm_s16le "$wav_file"
     if [ $? -ne 0 ]; then
       echo "  [ERROR] Failed to extract audio as WAV from $file" >> error.log
@@ -326,19 +321,23 @@ for file in "${all_files[@]}"; do
   ##############################
   cover_file=""
   cover_ext=""
-  # First, search for a cover file named "poster" with common image extensions.
+  # First, check for cover art files named "poster.<ext>" or "<base_noext>-poster.<ext>"
   for ext in jpg png webp; do
-    if [ -f "${dir}/poster.${ext}" ]; then
-      cover_file="${dir}/poster.${ext}"
+    if [ -f "${file_dir}/poster.${ext}" ]; then
+      cover_file="${file_dir}/poster.${ext}"
+      cover_ext="${ext}"
+      break
+    elif [ -f "${file_dir}/${base_noext}-poster.${ext}" ]; then
+      cover_file="${file_dir}/${base_noext}-poster.${ext}"
       cover_ext="${ext}"
       break
     fi
   done
-  # If not found, search for an image with the same base name as the video.
+  # If no cover art found, check for an image with the same base name.
   if [ -z "$cover_file" ]; then
     for ext in jpg png webp; do
-      if [ -f "${dir}/${base_noext}.${ext}" ]; then
-        cover_file="${dir}/${base_noext}.${ext}"
+      if [ -f "${file_dir}/${base_noext}.${ext}" ]; then
+        cover_file="${file_dir}/${base_noext}.${ext}"
         cover_ext="${ext}"
         break
       fi
@@ -347,7 +346,7 @@ for file in "${all_files[@]}"; do
 
   cover_tmp=""
   if [ -n "$cover_file" ]; then
-    cover_tmp="${dir}/cover.${cover_ext}"
+    cover_tmp="${file_dir}/cover.${cover_ext}"
     cp "$cover_file" "$cover_tmp"
     if [ "$cover_ext" == "jpg" ]; then
       cover_mimetype="image/jpeg"
@@ -361,7 +360,7 @@ for file in "${all_files[@]}"; do
     echo "  Found cover image: $cover_file, temporary copy: $cover_tmp"
   fi
 
-  out_temp="${dir}/${base_noext}.new.mkv"
+  out_temp="${file_dir}/${base_noext}.new.mkv"
   echo "  Muxing video and audio into MKV container..."
   ffmpeg -y -hide_banner -loglevel info -stats \
     -i "$tmp_video" \
@@ -381,12 +380,10 @@ for file in "${all_files[@]}"; do
   fi
 
   if [[ $is_wmv -eq 1 ]]; then
-    # For WMV files, skip size comparison and always use the new encoded file.
-    final_out="${dir}/${base_noext}.mkv"
+    final_out="${file_dir}/${base_noext}.mkv"
     mv "$out_temp" "$final_out"
   else
-    # Remux the original file into an MKV container for size comparison.
-    orig_remux="${dir}/${base_noext}.orig.mkv"
+    orig_remux="${file_dir}/${base_noext}.orig.mkv"
     echo "  Remuxing original file into MKV for comparison..."
     remux_to_mkv "$file" "$orig_remux"
     if [ $? -ne 0 ]; then
@@ -408,7 +405,6 @@ for file in "${all_files[@]}"; do
     fi
   fi
 
-  # Cleanup temporary files.
   rm -f "$orig_remux" "$tmp_video" "$audio_extracted"
   NEW_HASH=$(sha1sum "$final_out" | awk '{print $1}')
   mark_as_processed "$final_out" "$NEW_HASH"
