@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Do not use set -e to allow error handling to catch errors and continue.
+# Do not use set -e so that errors are caught and processing continues.
 set -u
 set -o pipefail
 
@@ -148,6 +148,30 @@ for file in "${all_files[@]}"; do
   base_noext="${base_name%.*}"
   ext_lower=$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')
 
+  # Get video dimensions using ffprobe.
+  orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file")
+  orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$file")
+  if [ "$orig_height" -gt 1080 ]; then
+    # Compute scale factor and new width.
+    scale_factor=$(awk "BEGIN {printf \"%.4f\", 1080 / $orig_height}")
+    new_width=$(awk "BEGIN {w=int($orig_width * $scale_factor); if (w % 2 != 0) w--; print w}")
+    resize_line="Lanczos4Resize(${new_width},1080)"
+  else
+    resize_line=""
+  fi
+
+  # Get the average frame rate as a fraction from ffprobe.
+  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
+            -of default=noprint_wrappers=1:nokey=1 "$file")
+  fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
+  # Use awk to check if fps is >= 50.
+  bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
+  if [ "$bobbed" -eq 1 ]; then
+    select_even_line="SelectEven()"
+  else
+    select_even_line=""
+  fi
+
   # Flag if file is WMV.
   if [[ "$ext_lower" == "wmv" ]]; then
     is_wmv=1
@@ -205,30 +229,40 @@ for file in "${all_files[@]}"; do
     fi
   else
     if [[ $is_wmv -eq 1 ]]; then
-      echo "  Re-encoding WMV file to x265 with adjusted Avisynth+ audio stream (stream_index=0)..."
+      echo "  Re-encoding WMV file to x265 using DirectShowSource..."
       tmp_avs="${dir}/${base_noext}.tmp.avs"
-      cat <<EOF > "$tmp_avs"
-video=LWLibavVideoSource("$file")
-audio=LWLibavAudioSource("$file",stream_index=0)
-AudioDub(video,audio)
-ConvertBits(8)
-ConverttoYV12()
-LRemoveDust(17,4)
-Prefetch(12)
-EOF
+      {
+        echo "video=DirectShowSource(\"$file\")"
+        echo "ConvertBits(8)"
+        echo "ConverttoYV12()"
+        if [ -n "$resize_line" ]; then
+          echo "$resize_line"
+        fi
+        if [ -n "$select_even_line" ]; then
+          echo "$select_even_line"
+        fi
+        echo "LRemoveDust(17,4)"
+        echo "Prefetch(12)"
+      } > "$tmp_avs"
     else
       echo "  Re-encoding video to x265 using Avisynth+ filter chain..."
       tmp_avs="${dir}/${base_noext}.tmp.avs"
-      cat <<EOF > "$tmp_avs"
-video=LWLibavVideoSource("$file")
-audio=LWLibavAudioSource("$file",stream_index=1)
-AudioDub(video,audio)
-ConvertBits(8)
-ConverttoYV12()
-LRemoveDust(17,4)
-Prefetch(12)
-EOF
-      # For non-WMV files, get the original file size for comparison.
+      {
+        echo "video=LWLibavVideoSource(\"$file\")"
+        echo "audio=LWLibavAudioSource(\"$file\",stream_index=1)"
+        echo "AudioDub(video,audio)"
+        echo "ConvertBits(8)"
+        echo "ConverttoYV12()"
+        if [ -n "$resize_line" ]; then
+          echo "$resize_line"
+        fi
+        if [ -n "$select_even_line" ]; then
+          echo "$select_even_line"
+        fi
+        echo "LRemoveDust(17,4)"
+        echo "Prefetch(12)"
+      } > "$tmp_avs"
+      # For non-WMV files, get the original file size for later comparison.
       orig_size=$(stat -c%s "$file")
     fi
 
@@ -288,7 +322,7 @@ EOF
   fi
 
   ##############################
-  # FINAL MUXING (to MKV) WITH COVER ATTACHMENT
+  # FINAL MUXING (to MKV) WITH COVER ART ATTACHMENT
   ##############################
   cover_file=""
   cover_ext=""
