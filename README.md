@@ -33,7 +33,7 @@ The script leverages Avisynth+ for pre-filtering via several plug-ins:
   [Avisynth+ on GitHub](https://github.com/AviSynth/AviSynthPlus)
 - [LSMASHSource](http://avisynth.nl/index.php/LSMASHSource) For loading video and audio (used for non-WMV files).
 - [DirectShowSource](http://avisynth.nl/index.php/DirectShowSource) Used to load WMV files in a single step (which avoids A/V sync issues).
-- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressability considerably.
+- [LRemoveDust](https://forum.doom9.org/showthread.php?t=176245) A simple noise reduction function that is moderately destructive to fine detail but improves compressibility substantially.
 
 ### FFmpeg
 - **Purpose:** Performs video and audio encoding/decoding, muxing, and remuxing.
@@ -71,30 +71,32 @@ These parameters can be adjusted in the script's configuration section at the to
 
 ## Assumptions About the User's System
 
-- **Operating Environment:** The script is intended for use in Git Bash on Windows. If you want to run it on a *nix system, it may require some path modifications. Qaac and AVS will need to run in a wine environment, or you can modify the script to use ffmpeg's built-in AAC encoder. If you're running *nix, I assume you know how to do these things.
+- **Operating Environment:** The script is intended for use in Git Bash on Windows. If you want to run it on a *nix system, it may require some path modifications. Qaac and AVS will need to run in a wine environment, or you can modify the script to use ffmpeg's built-in AAC encoder. If you're running *nix, I assume you are savvy enough to either know or be able to find out how to do these things.
 - **Executable PATH:** The following binaries must be in your system's PATH:
   - `ffmpeg` and `ffprobe` (with Avisynth+ support, as provided by Media Autobuild Suite)
   - `sqlite3`
   - `qaac` (note: requires iTunes)
   - `mkvmerge`
+- **Aspect ratio:** This script assumes that all of your videos have a square 1:1 pixel aspect ratio, which all HD videos should. It does not make allowances for non-square pixels (like 4:3 or anamorphic 16:9, i.e., DVDs).
 
 ## Usage
 
 1. **Download and Setup:**  
    Clone this repository or download the script (e.g., `hevc-shrinker.sh`) into the directory containing your video files.
+   Copy LRemoveDust.avsi, LimitChange.avsi, RGTools.dll, RemoveGrainHD.dll, and masktools2.dll to your AVISynth plugins directory (typically C:\Program Files (x86)\AviSynth+\plugins64+)
 2. **Make Executable:**  
-   Ensure the script is executable (only for *nix filesystems):
+   Ensure the script is executable (only for *nix filesystems, skip if you are on Windows):
    ```bash
    chmod +x hevc-shrinker.sh
 3. Run the Script:
    Open Git Bash, navigate to the directory, and run:
    ```bash
    ./hevc-shrinker.sh
-5. Error Logging:
+4. Error Logging:
    Errors encountered during processing are logged to error.log. Review this file for troubleshooting.
 
 ## Contributing
-Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. 
+Contributions, improvements, and bug fixes are welcome, but I make no promises and provide no support! I may or may not get around to it. I provide this script as a courtesy only.
 
 ## License
 This project is licensed under the GNU General Public License v2 (GPL-2.0). See GPL-2.0 License for details.
