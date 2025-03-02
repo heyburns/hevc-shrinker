@@ -12,13 +12,19 @@ VIDEO_EXT_REGEX=".*\.\(mp4\|mkv\|wmv\|avi\|mov\|flv\|mpeg\|mpg\|m4v\)$"
 
 # x265 Options
 # (The -tune option has been removed.)
-X265_CRF=23               # --crf 23  (Increase for higher compression at the expense of quality)
+X265_CRF=23               # --crf 23 (Increase for higher compression at the expense of quality)
 X265_PROFILE="main10"     # --profile main10
 X265_NO_SAO=1             # --no-sao => no-sao=1
 X265_SEL_SAO=0            # --selective-sao=0
 
 # SQLite DB for tracking processed files
 DB_FILE="processed_files.db"
+
+# Trash directory for original files being discarded.
+TRASH_DIR="./.Trash"
+if [ ! -d "$TRASH_DIR" ]; then
+  mkdir "$TRASH_DIR"
+fi
 
 # Initialize the database if it doesn't exist.
 if [ ! -f "$DB_FILE" ]; then
@@ -152,7 +158,8 @@ for file in "${all_files[@]}"; do
   # Gather video dimensions and average frame rate.
   orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$abs_file")
   orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$abs_file")
-  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of default=noprint_wrappers=1:nokey=1 "$abs_file")
+  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
+            -of default=noprint_wrappers=1:nokey=1 "$abs_file")
   fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
   bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
 
@@ -165,7 +172,7 @@ for file in "${all_files[@]}"; do
     resize_line=""
   fi
 
-  # Determine if the file is bobbed (frame rate >= 50 fps).
+  # Determine if frame rate is bobbed (fps >= 50).
   if [ "$bobbed" -eq 1 ]; then
     select_even_line="SelectEven()"
   else
@@ -184,7 +191,8 @@ for file in "${all_files[@]}"; do
           echo "  [ERROR] Remuxing failed for $abs_file" >> error.log
           continue
         fi
-        rm -f "$abs_file"
+        # Instead of deleting the original, move it to .Trash.
+        mv "$abs_file" "$TRASH_DIR/"
       else
         echo "  File is already H.265 + AAC with acceptable resolution/frame rate in MKV. Skipping processing."
         final_out="$abs_file"
@@ -206,7 +214,7 @@ for file in "${all_files[@]}"; do
 
   echo "  Processing file: $base_name"
 
-  # Flag if file is WMV, AVI, or FLV (these will always use the new encoded output).
+  # Flag if file is WMV, AVI, or FLV (new encoded output is always kept for these).
   if [[ "$ext_lower" == "wmv" || "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
     is_special=1
     echo "  Detected special file ($ext_lower); new encoded output will always be used."
@@ -235,10 +243,10 @@ for file in "${all_files[@]}"; do
     fi
   else
     tmp_avs="${file_dir}/${base_noext}.tmp.avs"
-    # Convert absolute path to Windows style for Avisynth.
+    # Convert absolute path to Windows-style path for Avisynth.
     win_file=$(cygpath -w "$abs_file")
-    if [[ $(echo "$ext_lower" | tr '[:upper:]' '[:lower:]') == "wmv" ]]; then
-      echo "  Re-encoding WMV file to H.265 using DirectShowSource..."
+    if [[ $(echo "$ext_lower" | tr '[:upper:]' '[:lower:]') == "wmv" || "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
+      echo "  Re-encoding special file to H.265 using DirectShowSource..."
       {
         echo "video=DirectShowSource(\"$win_file\")"
         echo "ConvertBits(8)"
@@ -323,7 +331,7 @@ for file in "${all_files[@]}"; do
   ##############################
   cover_file=""
   cover_ext=""
-  # First, check for cover art files named "poster.<ext>" or "<base_noext>-poster.<ext>"
+  # Check for cover art files named "poster.<ext>" or "<base_noext>-poster.<ext>".
   for ext in jpg png webp; do
     if [ -f "${file_dir}/poster.${ext}" ]; then
       cover_file="${file_dir}/poster.${ext}"
@@ -394,17 +402,20 @@ for file in "${all_files[@]}"; do
       rm -f "$orig_remux"
       continue
     fi
-
     original_size=$(stat -c%s "$orig_remux")
     new_size=$(stat -c%s "$out_temp")
     if (( new_size < original_size )); then
       echo "  New file is smaller. Using new encoded file."
       mv "$out_temp" "$final_out"
+      # Move the original file to TRASH.
+      mv "$abs_file" "$TRASH_DIR/"
       rm -f "$orig_remux"
     else
       echo "  New file is larger. Keeping remuxed original."
       mv "$orig_remux" "$final_out"
       rm -f "$out_temp"
+      # Move the original file to TRASH.
+      mv "$abs_file" "$TRASH_DIR/"
     fi
   fi
 
@@ -414,8 +425,7 @@ for file in "${all_files[@]}"; do
   echo "  File processed and recorded as: $final_out"
 
   if [ "$abs_file" != "$final_out" ]; then
-    echo "  Removing original file: $abs_file"
-    rm -f "$abs_file"
+    echo "  Original file moved to .Trash: $abs_file"
   fi
 
   rm -f "${abs_file}.lwi"
