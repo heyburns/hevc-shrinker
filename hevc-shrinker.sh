@@ -11,7 +11,7 @@ set -o pipefail
 VIDEO_EXT_REGEX=".*\.\(mp4\|mkv\|wmv\|avi\|mov\|flv\|mpeg\|mpg\|m4v\)$"
 
 # x265 Options
-X265_TUNE="grain"         # --tune grain
+# (The -tune option has been removed.)
 X265_CRF=23               # --crf 23  (Increase for higher compression at the expense of quality)
 X265_PROFILE="main10"     # --profile main10
 X265_NO_SAO=1             # --no-sao => no-sao=1
@@ -156,7 +156,7 @@ for file in "${all_files[@]}"; do
   fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
   bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
 
-  # Determine if the file needs to be resized.
+  # Determine if the file needs to be resized (vertical resolution > 1080).
   if [ "$orig_height" -gt 1080 ]; then
     scale_factor=$(awk "BEGIN {printf \"%.4f\", 1080 / $orig_height}")
     new_width=$(awk "BEGIN {w=int($orig_width * $scale_factor); if (w % 2 != 0) w--; print w}")
@@ -165,7 +165,7 @@ for file in "${all_files[@]}"; do
     resize_line=""
   fi
 
-  # Determine if frame rate is bobbed (fps >= 50).
+  # Determine if the file is bobbed (frame rate >= 50 fps).
   if [ "$bobbed" -eq 1 ]; then
     select_even_line="SelectEven()"
   else
@@ -206,12 +206,12 @@ for file in "${all_files[@]}"; do
 
   echo "  Processing file: $base_name"
 
-  # Flag if file is WMV.
-  if [[ "$ext_lower" == "wmv" ]]; then
-    is_wmv=1
-    echo "  Detected WMV file; special processing will be applied."
+  # Flag if file is WMV, AVI, or FLV (these will always use the new encoded output).
+  if [[ "$ext_lower" == "wmv" || "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
+    is_special=1
+    echo "  Detected special file ($ext_lower); new encoded output will always be used."
   else
-    is_wmv=0
+    is_special=0
   fi
 
   # Define the final output filename.
@@ -235,9 +235,9 @@ for file in "${all_files[@]}"; do
     fi
   else
     tmp_avs="${file_dir}/${base_noext}.tmp.avs"
-    # Convert the absolute path to a Windows-style path for Avisynth.
+    # Convert absolute path to Windows style for Avisynth.
     win_file=$(cygpath -w "$abs_file")
-    if [[ $is_wmv -eq 1 ]]; then
+    if [[ $(echo "$ext_lower" | tr '[:upper:]' '[:lower:]') == "wmv" ]]; then
       echo "  Re-encoding WMV file to H.265 using DirectShowSource..."
       {
         echo "video=DirectShowSource(\"$win_file\")"
@@ -268,15 +268,14 @@ for file in "${all_files[@]}"; do
       -i "$tmp_avs" \
       -an \
       -c:v libx265 \
-      -tune "$X265_TUNE" \
       -crf "$X265_CRF" \
       -x265-params "$(x265_params)" \
       "$tmp_video"
     ret=$?
     rm -f "$tmp_avs"
     if [ $ret -ne 0 ]; then
-      if [[ $is_wmv -eq 1 ]]; then
-        echo "  [ERROR] H.265 encoding via Avisynth+ failed for WMV file: $abs_file" >> error.log
+      if [[ $is_special -eq 1 ]]; then
+        echo "  [ERROR] H.265 encoding via Avisynth+ failed for special file: $abs_file" >> error.log
       else
         echo "  [ERROR] H.265 encoding via Avisynth+ failed for file: $abs_file" >> error.log
       fi
@@ -382,7 +381,8 @@ for file in "${all_files[@]}"; do
     rm -f "$cover_tmp"
   fi
 
-  if [[ $is_wmv -eq 1 ]]; then
+  # For special file types (wmv, avi, flv) always use the new encoded output.
+  if [[ $is_wmv -eq 1 || "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
     final_out="${file_dir}/${base_noext}.mkv"
     mv "$out_temp" "$final_out"
   else
@@ -394,6 +394,7 @@ for file in "${all_files[@]}"; do
       rm -f "$orig_remux"
       continue
     fi
+
     original_size=$(stat -c%s "$orig_remux")
     new_size=$(stat -c%s "$out_temp")
     if (( new_size < original_size )); then
