@@ -136,26 +136,27 @@ for file in "${all_files[@]}"; do
   echo "============================================"
   echo "Found video file: $file"
 
-  if has_been_processed "$file"; then
+  # Convert file path to an absolute path.
+  abs_file=$(realpath "$file")
+  if has_been_processed "$abs_file"; then
     echo "  [SKIP] Already processed. Skipping file."
     continue
   fi
 
-  # Determine directory, base filename, and extension.
-  file_dir="$(dirname "$file")"
-  base_name="$(basename "$file")"
+  # Determine file directory, base name, and extension.
+  file_dir=$(dirname "$abs_file")
+  base_name=$(basename "$abs_file")
   base_noext="${base_name%.*}"
-  ext_lower=$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')
+  ext_lower=$(echo "${abs_file##*.}" | tr '[:upper:]' '[:lower:]')
 
   # Gather video dimensions and average frame rate.
-  orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file")
-  orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$file")
-  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
-            -of default=noprint_wrappers=1:nokey=1 "$file")
+  orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$abs_file")
+  orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$abs_file")
+  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of default=noprint_wrappers=1:nokey=1 "$abs_file")
   fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
   bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
 
-  # Determine if the file needs to be resized (vertical resolution > 1080).
+  # Determine if the file needs to be resized.
   if [ "$orig_height" -gt 1080 ]; then
     scale_factor=$(awk "BEGIN {printf \"%.4f\", 1080 / $orig_height}")
     new_width=$(awk "BEGIN {w=int($orig_width * $scale_factor); if (w % 2 != 0) w--; print w}")
@@ -164,7 +165,7 @@ for file in "${all_files[@]}"; do
     resize_line=""
   fi
 
-  # Determine if the file is bobbed (frame rate ≥ 50 fps).
+  # Determine if frame rate is bobbed (fps >= 50).
   if [ "$bobbed" -eq 1 ]; then
     select_even_line="SelectEven()"
   else
@@ -173,24 +174,24 @@ for file in "${all_files[@]}"; do
 
   # Decide whether to skip processing.
   # Skip only if the file is already H.265 + AAC AND its height is ≤1080 AND its frame rate is below 50 fps.
-  if is_already_x265_aac "$file"; then
+  if is_already_x265_aac "$abs_file"; then
     if [ "$orig_height" -le 1080 ] && [ "$bobbed" -eq 0 ]; then
-      if [ "$(echo "${file##*.}" | tr '[:upper:]' '[:lower:]')" != "mkv" ]; then
-        echo "  File is already H.265 + AAC with acceptable resolution and frame rate but not in MKV. Remuxing..."
+      if [ "$(echo "${abs_file##*.}" | tr '[:upper:]' '[:lower:]')" != "mkv" ]; then
+        echo "  File is already H.265 + AAC with acceptable resolution/frame rate but not in MKV. Remuxing..."
         final_out="${file_dir}/${base_noext}.mkv"
-        remux_to_mkv "$file" "$final_out"
+        remux_to_mkv "$abs_file" "$final_out"
         if [ $? -ne 0 ]; then
-          echo "  [ERROR] Remuxing failed for $file" >> error.log
+          echo "  [ERROR] Remuxing failed for $abs_file" >> error.log
           continue
         fi
-        rm -f "$file"
+        rm -f "$abs_file"
       else
-        echo "  File is already H.265 + AAC with acceptable resolution and frame rate in MKV. Skipping processing."
-        final_out="$file"
+        echo "  File is already H.265 + AAC with acceptable resolution/frame rate in MKV. Skipping processing."
+        final_out="$abs_file"
       fi
       NEW_HASH=$(sha1sum "$final_out" | awk '{print $1}')
       mark_as_processed "$final_out" "$NEW_HASH"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       echo "============================================"
       continue
     else
@@ -199,11 +200,11 @@ for file in "${all_files[@]}"; do
       want_audio="copy"  # Copy audio if already AAC.
     fi
   else
-    want_video=$(decide_video_codec "$file")
-    want_audio=$(decide_audio_codec "$file")
+    want_video=$(decide_video_codec "$abs_file")
+    want_audio=$(decide_audio_codec "$abs_file")
   fi
 
-  echo "  Processing file: $(basename "$file")"
+  echo "  Processing file: $base_name"
 
   # Flag if file is WMV.
   if [[ "$ext_lower" == "wmv" ]]; then
@@ -225,19 +226,21 @@ for file in "${all_files[@]}"; do
   # --- VIDEO PROCESSING ---
   if [[ "$want_video" == "copy" ]]; then
     echo "  Video already in H.265. Copying video track..."
-    ffmpeg -y -hide_banner -loglevel error -i "$file" -an -c:v copy "$tmp_video"
+    ffmpeg -y -hide_banner -loglevel error -i "$abs_file" -an -c:v copy "$tmp_video"
     if [ $? -ne 0 ]; then
-      echo "  [ERROR] Failed to extract video track from $file" >> error.log
+      echo "  [ERROR] Failed to extract video track from $abs_file" >> error.log
       rm -f "$tmp_video"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       continue
     fi
   else
     tmp_avs="${file_dir}/${base_noext}.tmp.avs"
+    # Convert the absolute path to a Windows-style path for Avisynth.
+    win_file=$(cygpath -w "$abs_file")
     if [[ $is_wmv -eq 1 ]]; then
       echo "  Re-encoding WMV file to H.265 using DirectShowSource..."
       {
-        echo "video=DirectShowSource(\"$file\")"
+        echo "video=DirectShowSource(\"$win_file\")"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
         if [ -n "$resize_line" ]; then echo "$resize_line"; fi
@@ -248,8 +251,8 @@ for file in "${all_files[@]}"; do
     else
       echo "  Re-encoding video to H.265 using Avisynth+ filter chain..."
       {
-        echo "video=LWLibavVideoSource(\"$file\")"
-        echo "audio=LWLibavAudioSource(\"$file\",stream_index=1)"
+        echo "video=LWLibavVideoSource(\"$win_file\")"
+        echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=1)"
         echo "AudioDub(video,audio)"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
@@ -258,7 +261,7 @@ for file in "${all_files[@]}"; do
         echo "LRemoveDust(17,4)"
         echo "Prefetch(12)"
       } > "$tmp_avs"
-      orig_size=$(stat -c%s "$file")
+      orig_size=$(stat -c%s "$abs_file")
     fi
 
     ffmpeg -y -hide_banner -loglevel info -stats \
@@ -273,12 +276,12 @@ for file in "${all_files[@]}"; do
     rm -f "$tmp_avs"
     if [ $ret -ne 0 ]; then
       if [[ $is_wmv -eq 1 ]]; then
-        echo "  [ERROR] H.265 encoding via Avisynth+ failed for WMV file: $file" >> error.log
+        echo "  [ERROR] H.265 encoding via Avisynth+ failed for WMV file: $abs_file" >> error.log
       else
-        echo "  [ERROR] H.265 encoding via Avisynth+ failed for file: $file" >> error.log
+        echo "  [ERROR] H.265 encoding via Avisynth+ failed for file: $abs_file" >> error.log
       fi
       rm -f "$tmp_video"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       continue
     fi
   fi
@@ -287,29 +290,29 @@ for file in "${all_files[@]}"; do
   audio_extracted=""
   if [[ "$want_audio" == "copy" ]]; then
     echo "  Audio already AAC. Copying audio track..."
-    ffmpeg -y -hide_banner -loglevel error -i "$file" -vn -c:a copy "${file_dir}/${base_noext}.tmpaudio.aac"
+    ffmpeg -y -hide_banner -loglevel error -i "$abs_file" -vn -c:a copy "${file_dir}/${base_noext}.tmpaudio.aac"
     if [ $? -ne 0 ]; then
-      echo "  [ERROR] Failed to extract AAC track from $file" >> error.log
+      echo "  [ERROR] Failed to extract AAC track from $abs_file" >> error.log
       rm -f "$tmp_video" "${file_dir}/${base_noext}.tmpaudio.aac"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       continue
     fi
     audio_extracted="${file_dir}/${base_noext}.tmpaudio.aac"
   else
     echo "  Re-encoding audio to AAC (QAAC VBR 100)..."
     wav_file="${file_dir}/${base_noext}.tmpaudio.wav"
-    ffmpeg -y -hide_banner -loglevel error -i "$file" -vn -acodec pcm_s16le "$wav_file"
+    ffmpeg -y -hide_banner -loglevel error -i "$abs_file" -vn -acodec pcm_s16le "$wav_file"
     if [ $? -ne 0 ]; then
-      echo "  [ERROR] Failed to extract audio as WAV from $file" >> error.log
+      echo "  [ERROR] Failed to extract audio as WAV from $abs_file" >> error.log
       rm -f "$tmp_video" "$wav_file"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       continue
     fi
     qaac --silent -V 100 "$wav_file" -o "$tmp_audio"
     if [ $? -ne 0 ]; then
-      echo "  [ERROR] QAAC encoding failed for file: $file" >> error.log
+      echo "  [ERROR] QAAC encoding failed for file: $abs_file" >> error.log
       rm -f "$tmp_video" "$wav_file" "$tmp_audio"
-      rm -f "${file}.lwi"
+      rm -f "${abs_file}.lwi"
       continue
     fi
     rm -f "$wav_file"
@@ -333,7 +336,7 @@ for file in "${all_files[@]}"; do
       break
     fi
   done
-  # If no cover art found, check for an image with the same base name.
+  # If no cover art is found, check for an image with the same base name.
   if [ -z "$cover_file" ]; then
     for ext in jpg png webp; do
       if [ -f "${file_dir}/${base_noext}.${ext}" ]; then
@@ -368,10 +371,10 @@ for file in "${all_files[@]}"; do
     ${cover_tmp:+-attach "$cover_tmp" -metadata:s:t mimetype=$cover_mimetype} \
     -c copy "$out_temp"
   if [ $? -ne 0 ]; then
-    echo "  [ERROR] Final muxing failed for file: $file" >> error.log
+    echo "  [ERROR] Final muxing failed for file: $abs_file" >> error.log
     rm -f "$tmp_video" "$audio_extracted" "$out_temp"
     [ -n "$cover_tmp" ] && rm -f "$cover_tmp"
-    rm -f "${file}.lwi"
+    rm -f "${abs_file}.lwi"
     continue
   fi
 
@@ -385,13 +388,12 @@ for file in "${all_files[@]}"; do
   else
     orig_remux="${file_dir}/${base_noext}.orig.mkv"
     echo "  Remuxing original file into MKV for comparison..."
-    remux_to_mkv "$file" "$orig_remux"
+    remux_to_mkv "$abs_file" "$orig_remux"
     if [ $? -ne 0 ]; then
-      echo "  [ERROR] Remuxing original file failed for $file" >> error.log
+      echo "  [ERROR] Remuxing original file failed for $abs_file" >> error.log
       rm -f "$orig_remux"
       continue
     fi
-
     original_size=$(stat -c%s "$orig_remux")
     new_size=$(stat -c%s "$out_temp")
     if (( new_size < original_size )); then
@@ -410,12 +412,12 @@ for file in "${all_files[@]}"; do
   mark_as_processed "$final_out" "$NEW_HASH"
   echo "  File processed and recorded as: $final_out"
 
-  if [ "$file" != "$final_out" ]; then
-    echo "  Removing original file: $file"
-    rm -f "$file"
+  if [ "$abs_file" != "$final_out" ]; then
+    echo "  Removing original file: $abs_file"
+    rm -f "$abs_file"
   fi
 
-  rm -f "${file}.lwi"
+  rm -f "${abs_file}.lwi"
   echo "============================================"
 done
 
