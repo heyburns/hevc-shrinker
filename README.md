@@ -2,7 +2,7 @@
 
 HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using FFmpeg and Avisynth+ filtering to improve compression, compares the size of the re-encoded file to the original, and retains the smaller version. It tracks processed files using a SQLite database. Designed for use in Git Bash on Windows, this script automates video optimization while preserving quality and reducing file sizes.
 
-**NOTE** THIS SCRIPT IS UNFORGIVING AND DELETES FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. While this script usually delivers visually transparent transcodes at the settings I've selected, it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you can live with the occasional mistake. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
+**NOTE** THIS SCRIPT IS UNFORGIVING AND MAY DELETE FILES PERMANENTLY WITHOUT PROMPTING, SO BE SURE YOU UNDERSTAND WHAT IT DOES AND TEST IT BEFORE USING ON YOUR COLLECTION. This script delivers generally transparent transcodes at the settings I've selected, and it is designed for batch use on very large collections where file size and format consistency are the primary considerations and you can live with the occasional mistake. If quality is your top consideration, you're better off handling your files individually. Use at your own risk.
 
 ## Features
 
@@ -16,7 +16,7 @@ HEVC-Shrinker is a Bash script that re-encodes video files to HEVC (H.265) using
   - Otherwise, audio is re-encoded using QAAC.
 - **Cover Art Detection:**  
   The script searches for cover art in the same directory as the video file. It first checks for a file named `poster.jpg`, `poster.png`, or `poster.webp`. If none is found, it then looks for an image file with the same base name as the video (e.g., for `video.jpg`, and it looks for `video-poster.jpg`.
-- **Muxing:** Combines the processed video, audio, and optional cover art into an MKV container.
+- **Muxing:** Combines the processed video, audio, and optional cover art into an MKV container. If the new output is being kept, the original file is moved to a .Trash directory for recycle bin-like functionality.
 - **Size Comparison:**  
   For non-WMV files, after muxing the original file is remuxed to MKV for a fair size comparison—the smaller file is kept.  
   For WMV files, size comparison is skipped and the HEVC output is always used (due to incompatibility of WMV with Matroska containers).
