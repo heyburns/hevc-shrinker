@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stable Branch with Trash: Original files are moved to .Trash after successful processing.
+# Stable Branch with Trash and Universal Audio Detection:
+# Original files are moved to .Trash after successful processing.
 set -u
 set -o pipefail
 
@@ -42,6 +43,19 @@ fi
 # Helper Functions
 ##########################################
 
+# Returns the index of the first audio stream (if any); defaults to 0.
+get_audio_stream_index() {
+  local file="$1"
+  local index
+  index=$(ffprobe -v error -select_streams a -show_entries stream=index \
+    -of csv=p=0 "$file" | head -n1)
+  if [ -z "$index" ]; then
+    index=0
+  fi
+  echo "$index"
+}
+
+# Check if the first video track is H.265 (HEVC) AND the first audio track is AAC.
 is_already_x265_aac() {
   local file="$1"
   local video_codec audio_codec
@@ -56,6 +70,7 @@ is_already_x265_aac() {
   [[ "$video_codec" == "hevc" && "$audio_codec" == "aac" ]]
 }
 
+# Return "copy" if video is H.265, otherwise "libx265".
 decide_video_codec() {
   local file="$1"
   local vcodec
@@ -70,6 +85,7 @@ decide_video_codec() {
   fi
 }
 
+# Return "copy" if audio is AAC, otherwise "qaac".
 decide_audio_codec() {
   local file="$1"
   local acodec
@@ -84,10 +100,12 @@ decide_audio_codec() {
   fi
 }
 
+# Build string for -x265-params.
 x265_params() {
   echo "profile=${X265_PROFILE}:no-sao=${X265_NO_SAO}:selective-sao=${X265_SEL_SAO}"
 }
 
+# SQLite helper: Check if a file has been processed.
 has_been_processed() {
   local filepath="$1"
   local esc_filepath="${filepath//\'/\'\'}"
@@ -96,6 +114,7 @@ has_been_processed() {
   [ "$count" -gt 0 ]
 }
 
+# SQLite helper: Mark a file as processed.
 mark_as_processed() {
   local final_filepath="$1"
   local filehash="$2"
@@ -118,7 +137,7 @@ remux_to_mkv() {
 # Main Script
 ##########################################
 
-# Exclude files in .Trash from search.
+# Exclude .Trash folder from search.
 mapfile -d '' all_files < <(find . -type f -not -path "./.Trash/*" -iregex "$VIDEO_EXT_REGEX" -print0)
 
 for file in "${all_files[@]}"; do
@@ -126,7 +145,7 @@ for file in "${all_files[@]}"; do
   echo "Found video file: $file"
 
   abs_file=$(realpath "$file")
-  # Save the original file path separately.
+  # Save the original file path.
   orig_file="$abs_file"
   
   if has_been_processed "$abs_file"; then
@@ -192,15 +211,15 @@ for file in "${all_files[@]}"; do
 
   echo "  Processing file: $base_name"
 
-  # For WMV and FLV files, use stream_index=0 for audio.
+  # For WMV and FLV files, use universal detection for audio stream.
+  # (AVI files remain special.)
   if [[ "$ext_lower" == "wmv" || "$ext_lower" == "flv" ]]; then
     is_wmv=1
-    echo "  Detected WMV/FLV file; using stream_index=0 for audio."
+    echo "  Detected WMV/FLV file; using universal audio detection."
   else
     is_wmv=0
   fi
 
-  # AVI files remain special (using stream_index=1)
   if [[ "$ext_lower" == "avi" ]]; then
     is_special=1
     echo "  Detected special file (AVI); new encoded output will always be used."
@@ -230,10 +249,12 @@ for file in "${all_files[@]}"; do
     tmp_avs="${file_dir}/${base_noext}.tmp.avs"
     win_file=$(cygpath -w "$abs_file")
     if [[ $is_wmv -eq 1 ]]; then
-      echo "  Re-encoding WMV/FLV file to H.265 using LWLibavVideoSource (audio stream_index=0)..."
+      echo "  Re-encoding WMV/FLV file to H.265 using LWLibavVideoSource..."
+      # Use universal audio detection
+      audio_index=$(get_audio_stream_index "$abs_file")
       {
         echo "video=LWLibavVideoSource(\"$win_file\")"
-        echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=0)"
+        echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=$audio_index)"
         echo "AudioDub(video,audio)"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
@@ -244,9 +265,11 @@ for file in "${all_files[@]}"; do
       } > "$tmp_avs"
     else
       echo "  Re-encoding video to H.265 using Avisynth+ filter chain..."
+      # Use universal audio detection in all cases now
+      audio_index=$(get_audio_stream_index "$abs_file")
       {
         echo "video=LWLibavVideoSource(\"$win_file\")"
-        echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=1)"
+        echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=$audio_index)"
         echo "AudioDub(video,audio)"
         echo "ConvertBits(8)"
         echo "ConverttoYV12()"
