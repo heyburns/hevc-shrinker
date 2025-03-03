@@ -25,6 +25,8 @@ if [ ! -d "$TRASH_DIR" ]; then
   mkdir "$TRASH_DIR"
 fi
 
+# Exclude .Trash folder from processing via the find command below.
+
 # Initialize the database if it doesn't exist.
 if [ ! -f "$DB_FILE" ]; then
   sqlite3 "$DB_FILE" <<EOF
@@ -40,7 +42,6 @@ fi
 # Helper Functions
 ##########################################
 
-# Check if the first video track is H.265 (HEVC) AND the first audio track is AAC.
 is_already_x265_aac() {
   local file="$1"
   local video_codec audio_codec
@@ -52,14 +53,9 @@ is_already_x265_aac() {
     ffprobe -hide_banner -loglevel error -select_streams a:0 \
       -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null | head -n1 | tr '[:upper:]' '[:lower:]'
   )
-  if [[ "$video_codec" == "hevc" && "$audio_codec" == "aac" ]]; then
-    return 0
-  else
-    return 1
-  fi
+  [[ "$video_codec" == "hevc" && "$audio_codec" == "aac" ]]
 }
 
-# Return "copy" if video is H.265, otherwise "libx265".
 decide_video_codec() {
   local file="$1"
   local vcodec
@@ -74,7 +70,6 @@ decide_video_codec() {
   fi
 }
 
-# Return "copy" if audio is AAC, otherwise "qaac".
 decide_audio_codec() {
   local file="$1"
   local acodec
@@ -89,25 +84,18 @@ decide_audio_codec() {
   fi
 }
 
-# Build string for -x265-params.
 x265_params() {
   echo "profile=${X265_PROFILE}:no-sao=${X265_NO_SAO}:selective-sao=${X265_SEL_SAO}"
 }
 
-# SQLite helper: Check if a file has been processed.
 has_been_processed() {
   local filepath="$1"
   local esc_filepath="${filepath//\'/\'\'}"
   local count
   count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM processed_files WHERE filepath = '$esc_filepath';")
-  if [ "$count" -gt 0 ]; then
-    return 0  # Processed.
-  else
-    return 1  # Not processed.
-  fi
+  [ "$count" -gt 0 ]
 }
 
-# SQLite helper: Mark a file as processed.
 mark_as_processed() {
   local final_filepath="$1"
   local filehash="$2"
@@ -118,10 +106,11 @@ mark_as_processed() {
 }
 
 # Remux any file to an MKV container (lossless copy).
+# Added -fflags +genpts to help with files like .mpg.
 remux_to_mkv() {
   local infile="$1"
   local outfile="$2"
-  ffmpeg -y -hide_banner -loglevel error -i "$infile" -c copy "$outfile"
+  ffmpeg -y -hide_banner -loglevel error -fflags +genpts -i "$infile" -c copy "$outfile"
   return $?
 }
 
@@ -129,13 +118,17 @@ remux_to_mkv() {
 # Main Script
 ##########################################
 
-mapfile -d '' all_files < <(find . -type f -iregex "$VIDEO_EXT_REGEX" -print0)
+# Exclude files in .Trash from search.
+mapfile -d '' all_files < <(find . -type f -not -path "./.Trash/*" -iregex "$VIDEO_EXT_REGEX" -print0)
 
 for file in "${all_files[@]}"; do
   echo "============================================"
   echo "Found video file: $file"
 
   abs_file=$(realpath "$file")
+  # Save the original file path separately.
+  orig_file="$abs_file"
+  
   if has_been_processed "$abs_file"; then
     echo "  [SKIP] Already processed. Skipping file."
     continue
@@ -177,8 +170,7 @@ for file in "${all_files[@]}"; do
           echo "  [ERROR] Remuxing failed for $abs_file" >> error.log
           continue
         fi
-        # Move the original file to trash (for this test version, we delete it)
-        rm -f "$abs_file"
+        mv -v "$orig_file" "$TRASH_DIR/$base_name"
       else
         echo "  File is already H.265 + AAC with acceptable resolution/frame rate in MKV. Skipping processing."
         final_out="$abs_file"
@@ -200,16 +192,18 @@ for file in "${all_files[@]}"; do
 
   echo "  Processing file: $base_name"
 
-  if [[ "$ext_lower" == "wmv" ]]; then
+  # For WMV and FLV files, use stream_index=0 for audio.
+  if [[ "$ext_lower" == "wmv" || "$ext_lower" == "flv" ]]; then
     is_wmv=1
-    echo "  Detected WMV file; using stream_index=0 for audio."
+    echo "  Detected WMV/FLV file; using stream_index=0 for audio."
   else
     is_wmv=0
   fi
 
-  if [[ "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
+  # AVI files remain special (using stream_index=1)
+  if [[ "$ext_lower" == "avi" ]]; then
     is_special=1
-    echo "  Detected special file ($ext_lower); new encoded output will always be used."
+    echo "  Detected special file (AVI); new encoded output will always be used."
   else
     is_special=0
   fi
@@ -236,7 +230,7 @@ for file in "${all_files[@]}"; do
     tmp_avs="${file_dir}/${base_noext}.tmp.avs"
     win_file=$(cygpath -w "$abs_file")
     if [[ $is_wmv -eq 1 ]]; then
-      echo "  Re-encoding WMV file to H.265 using LWLibavVideoSource (audio stream_index=0)..."
+      echo "  Re-encoding WMV/FLV file to H.265 using LWLibavVideoSource (audio stream_index=0)..."
       {
         echo "video=LWLibavVideoSource(\"$win_file\")"
         echo "audio=LWLibavAudioSource(\"$win_file\",stream_index=0)"
@@ -378,8 +372,7 @@ for file in "${all_files[@]}"; do
   if [[ $is_wmv -eq 1 || "$ext_lower" == "avi" || "$ext_lower" == "flv" ]]; then
     final_out="${file_dir}/${base_noext}.mkv"
     mv "$out_temp" "$final_out"
-    # For special file types, move the original to trash.
-    mv "$abs_file" "$TRASH_DIR/$base_name"
+    mv -v "$orig_file" "$TRASH_DIR/$base_name"
   else
     orig_remux="${file_dir}/${base_noext}.orig.mkv"
     echo "  Remuxing original file into MKV for comparison..."
@@ -395,12 +388,12 @@ for file in "${all_files[@]}"; do
       echo "  New file is smaller. Using new encoded file."
       mv "$out_temp" "$final_out"
       rm -f "$orig_remux"
-      mv "$abs_file" "$TRASH_DIR/$base_name"
+      mv -v "$orig_file" "$TRASH_DIR/$base_name"
     else
       echo "  New file is larger. Keeping remuxed original."
       mv "$orig_remux" "$final_out"
       rm -f "$out_temp"
-      mv "$abs_file" "$TRASH_DIR/$base_name"
+      # Leave the original file in place if the remuxed one is kept.
     fi
   fi
 
@@ -409,8 +402,8 @@ for file in "${all_files[@]}"; do
   mark_as_processed "$final_out" "$NEW_HASH"
   echo "  File processed and recorded as: $final_out"
 
-  if [ "$abs_file" != "$final_out" ]; then
-    echo "  Original file moved to .Trash: $abs_file"
+  if [ "$orig_file" != "$final_out" ]; then
+    echo "  Original file moved to .Trash: $orig_file"
   fi
 
   rm -f "${abs_file}.lwi"
