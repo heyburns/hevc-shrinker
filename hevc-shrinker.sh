@@ -160,8 +160,7 @@ for file in "${all_files[@]}"; do
 
   orig_height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$abs_file")
   orig_width=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$abs_file")
-  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
-            -of default=noprint_wrappers=1:nokey=1 "$abs_file")
+  fps_str=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of default=noprint_wrappers=1:nokey=1 "$abs_file")
   fps=$(awk -F'/' '{if($2!="0") printf "%.2f", $1/$2; else print 0}' <<< "$fps_str")
   bobbed=$(awk "BEGIN {print ($fps >= 50) ? 1 : 0}")
 
@@ -211,15 +210,15 @@ for file in "${all_files[@]}"; do
 
   echo "  Processing file: $base_name"
 
-  # For WMV and FLV files, use universal detection for audio stream.
-  # (AVI files remain special.)
+  # For WMV and FLV files, use audio stream_index determined by universal detection.
   if [[ "$ext_lower" == "wmv" || "$ext_lower" == "flv" ]]; then
     is_wmv=1
-    echo "  Detected WMV/FLV file; using universal audio detection."
+    echo "  Detected WMV/FLV file; using universal audio detection (stream_index from first audio stream)."
   else
     is_wmv=0
   fi
 
+  # AVI files remain special.
   if [[ "$ext_lower" == "avi" ]]; then
     is_special=1
     echo "  Detected special file (AVI); new encoded output will always be used."
@@ -250,7 +249,6 @@ for file in "${all_files[@]}"; do
     win_file=$(cygpath -w "$abs_file")
     if [[ $is_wmv -eq 1 ]]; then
       echo "  Re-encoding WMV/FLV file to H.265 using LWLibavVideoSource..."
-      # Use universal audio detection
       audio_index=$(get_audio_stream_index "$abs_file")
       {
         echo "video=LWLibavVideoSource(\"$win_file\")"
@@ -261,11 +259,11 @@ for file in "${all_files[@]}"; do
         [ -n "$resize_line" ] && echo "$resize_line"
         [ -n "$select_even_line" ] && echo "$select_even_line"
         echo "LRemoveDust(17,4)"
+        echo "ConvertBits(10)"
         echo "Prefetch(12)"
       } > "$tmp_avs"
     else
       echo "  Re-encoding video to H.265 using Avisynth+ filter chain..."
-      # Use universal audio detection in all cases now
       audio_index=$(get_audio_stream_index "$abs_file")
       {
         echo "video=LWLibavVideoSource(\"$win_file\")"
@@ -276,6 +274,7 @@ for file in "${all_files[@]}"; do
         [ -n "$resize_line" ] && echo "$resize_line"
         [ -n "$select_even_line" ] && echo "$select_even_line"
         echo "LRemoveDust(17,4)"
+        echo "ConvertBits(10)"
         echo "Prefetch(12)"
       } > "$tmp_avs"
       orig_size=$(stat -c%s "$abs_file")
@@ -416,7 +415,7 @@ for file in "${all_files[@]}"; do
       echo "  New file is larger. Keeping remuxed original."
       mv "$orig_remux" "$final_out"
       rm -f "$out_temp"
-      # Leave the original file in place if the remuxed one is kept.
+      # Do not move the original file when keeping the remuxed one.
     fi
   fi
 
