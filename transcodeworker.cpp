@@ -88,7 +88,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
     QProcess proc;
     proc.start(ffprobeBin, {
         "-v", "error",
-        "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,avg_frame_rate,field_order",
+        "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,avg_frame_rate,field_order,display_aspect_ratio",
         "-of", "json",
         filepath
     });
@@ -110,6 +110,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
                     meta.width = s["width"].toInt();
                     meta.height = s["height"].toInt();
                     meta.fieldOrder = s["field_order"].toString().toLower();
+                    meta.displayAspectRatio = s["display_aspect_ratio"].toString();
                     
                     QString fpsStr = s["avg_frame_rate"].toString();
                     if (fpsStr.contains("/")) {
@@ -362,8 +363,11 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             << "-map" << "0:a?"
             << "-map" << "0:s?"
             << "-map" << "0:t?";
-    cmdArgs << "-metadata" << "title=" + baseNoExt
-            << tmpOut;
+    cmdArgs << "-metadata" << "title=" + baseNoExt;
+    if (!meta.displayAspectRatio.isEmpty() && meta.displayAspectRatio != "0:1") {
+        cmdArgs << "-aspect" << meta.displayAspectRatio;
+    }
+    cmdArgs << tmpOut;
 
     // Execute transcode process
     emit logSignal(QString("Executing: %1 %2").arg(ffmpegBin, cmdArgs.join(" ")));

@@ -52,6 +52,7 @@ struct VideoMetadata {
     double duration = 0.0;
     double fps = 0.0;
     QString fieldOrder;
+    QString displayAspectRatio;
     bool hasAudio = false;
 };
 
