@@ -31,6 +31,7 @@ private:
     QString m_connectionName;
     
     QSqlDatabase db();
+    void closeDb();
 };
 
 #endif // DATABASEMANAGER_H

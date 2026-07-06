@@ -16,8 +16,18 @@ DatabaseManager::DatabaseManager(const QString &dbPath)
 
 DatabaseManager::~DatabaseManager()
 {
-    // Remove the database connection when this instance is destroyed
+    closeDb();
+}
+
+void DatabaseManager::closeDb()
+{
     if (QSqlDatabase::contains(m_connectionName)) {
+        {
+            QSqlDatabase d = QSqlDatabase::database(m_connectionName);
+            if (d.isOpen()) {
+                d.close();
+            }
+        }
         QSqlDatabase::removeDatabase(m_connectionName);
     }
 }
@@ -42,23 +52,27 @@ QSqlDatabase DatabaseManager::db()
 
 bool DatabaseManager::init()
 {
-    QSqlDatabase d = db();
-    if (!d.isOpen()) return false;
-
-    QSqlQuery query(d);
-    bool ok = query.exec(
-        "CREATE TABLE IF NOT EXISTS processed_files ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "filepath TEXT UNIQUE, "
-        "original_size INTEGER, "
-        "compressed_size INTEGER, "
-        "hash TEXT, "
-        "processed_at DATETIME DEFAULT CURRENT_TIMESTAMP"
-        ")"
-    );
-    if (!ok) {
-        qWarning() << "Failed to create table:" << query.lastError().text();
+    bool ok = false;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QSqlQuery query(d);
+            ok = query.exec(
+                "CREATE TABLE IF NOT EXISTS processed_files ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "filepath TEXT UNIQUE, "
+                "original_size INTEGER, "
+                "compressed_size INTEGER, "
+                "hash TEXT, "
+                "processed_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            );
+            if (!ok) {
+                qWarning() << "Failed to create table:" << query.lastError().text();
+            }
+        }
     }
+    closeDb();
     return ok;
 }
 
@@ -71,52 +85,55 @@ ProcessedFileInfo DatabaseManager::getProcessedFileInfo(const QString &filepath)
         return info;
     }
 
-    QSqlDatabase d = db();
-    if (!d.isOpen()) return info;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QString absPath = QFileInfo(filepath).absoluteFilePath();
+            QFileInfo dbFileInfo(m_dbPath);
+            QDir rootDir = dbFileInfo.dir();
+            QString relpath = rootDir.relativeFilePath(absPath);
+            relpath.replace("\\", "/");
 
-    QString absPath = QFileInfo(filepath).absoluteFilePath();
-    QFileInfo dbFileInfo(m_dbPath);
-    QDir rootDir = dbFileInfo.dir();
-    QString relpath = rootDir.relativeFilePath(absPath);
-    relpath.replace("\\", "/");
-
-    QSqlQuery query(d);
-    query.prepare(
-        "SELECT original_size, compressed_size, hash, filepath FROM processed_files "
-        "WHERE filepath = :filepath "
-        "   OR filepath = :relpath "
-        "   OR filepath LIKE '%' || :relpath"
-    );
-    query.bindValue(":filepath", absPath);
-    query.bindValue(":relpath", relpath);
-    
-    if (query.exec() && query.next()) {
-        info.found = true;
-        
-        QVariant origVal = query.value(0);
-        QVariant compVal = query.value(1);
-        info.hash = query.value(2).toString();
-        QString matchedPath = query.value(3).toString();
-        
-        // Auto-repair/backfill legacy records if sizes are null
-        if (origVal.isNull() || compVal.isNull()) {
-            QFileInfo fileInfo(filepath);
-            qint64 currentSize = fileInfo.exists() ? fileInfo.size() : 0;
-            info.originalSize = currentSize;
-            info.compressedSize = currentSize;
+            QSqlQuery query(d);
+            query.prepare(
+                "SELECT original_size, compressed_size, hash, filepath FROM processed_files "
+                "WHERE filepath = :filepath "
+                "   OR filepath = :relpath "
+                "   OR filepath LIKE '%' || :relpath"
+            );
+            query.bindValue(":filepath", absPath);
+            query.bindValue(":relpath", relpath);
             
-            // Update the record with backfilled size
-            QSqlQuery updateQuery(d);
-            updateQuery.prepare("UPDATE processed_files SET original_size = :orig, compressed_size = :comp WHERE filepath = :filepath");
-            updateQuery.bindValue(":orig", currentSize);
-            updateQuery.bindValue(":comp", currentSize);
-            updateQuery.bindValue(":filepath", matchedPath);
-            updateQuery.exec();
-        } else {
-            info.originalSize = origVal.toLongLong();
-            info.compressedSize = compVal.toLongLong();
+            if (query.exec() && query.next()) {
+                info.found = true;
+                
+                QVariant origVal = query.value(0);
+                QVariant compVal = query.value(1);
+                info.hash = query.value(2).toString();
+                QString matchedPath = query.value(3).toString();
+                
+                // Auto-repair/backfill legacy records if sizes are null
+                if (origVal.isNull() || compVal.isNull()) {
+                    QFileInfo fileInfo(filepath);
+                    qint64 currentSize = fileInfo.exists() ? fileInfo.size() : 0;
+                    info.originalSize = currentSize;
+                    info.compressedSize = currentSize;
+                    
+                    // Update the record with backfilled size
+                    QSqlQuery updateQuery(d);
+                    updateQuery.prepare("UPDATE processed_files SET original_size = :orig, compressed_size = :comp WHERE filepath = :filepath");
+                    updateQuery.bindValue(":orig", currentSize);
+                    updateQuery.bindValue(":comp", currentSize);
+                    updateQuery.bindValue(":filepath", matchedPath);
+                    updateQuery.exec();
+                } else {
+                    info.originalSize = origVal.toLongLong();
+                    info.compressedSize = compVal.toLongLong();
+                }
+            }
         }
     }
+    closeDb();
     return info;
 }
 
@@ -128,29 +145,33 @@ bool DatabaseManager::recordProcessedFile(const QString &filepath, qint64 origin
         init();
     }
 
-    QSqlDatabase d = db();
-    if (!d.isOpen()) return false;
+    bool ok = false;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QString absPath = QFileInfo(filepath).absoluteFilePath();
+            QFileInfo dbFileInfo(m_dbPath);
+            QDir rootDir = dbFileInfo.dir();
+            QString relpath = rootDir.relativeFilePath(absPath);
+            relpath.replace("\\", "/");
 
-    QString absPath = QFileInfo(filepath).absoluteFilePath();
-    QFileInfo dbFileInfo(m_dbPath);
-    QDir rootDir = dbFileInfo.dir();
-    QString relpath = rootDir.relativeFilePath(absPath);
-    relpath.replace("\\", "/");
+            QSqlQuery query(d);
+            query.prepare(
+                "INSERT OR REPLACE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
+                "VALUES (:filepath, :orig, :comp, :hash, CURRENT_TIMESTAMP)"
+            );
+            query.bindValue(":filepath", relpath);
+            query.bindValue(":orig", originalSize);
+            query.bindValue(":comp", compressedSize);
+            query.bindValue(":hash", hash);
 
-    QSqlQuery query(d);
-    query.prepare(
-        "INSERT OR REPLACE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
-        "VALUES (:filepath, :orig, :comp, :hash, CURRENT_TIMESTAMP)"
-    );
-    query.bindValue(":filepath", relpath);
-    query.bindValue(":orig", originalSize);
-    query.bindValue(":comp", compressedSize);
-    query.bindValue(":hash", hash);
-
-    bool ok = query.exec();
-    if (!ok) {
-        qWarning() << "Failed to insert record:" << query.lastError().text();
+            ok = query.exec();
+            if (!ok) {
+                qWarning() << "Failed to insert record:" << query.lastError().text();
+            }
+        }
     }
+    closeDb();
     return ok;
 }
 
@@ -166,22 +187,26 @@ bool DatabaseManager::getSpaceSavings(double &totalOriginalMb, double &totalComp
         return false;
     }
 
-    QSqlDatabase d = db();
-    if (!d.isOpen()) return false;
-
-    QSqlQuery query(d);
-    bool ok = query.exec("SELECT SUM(original_size), SUM(compressed_size) FROM processed_files");
-    if (ok && query.next()) {
-        qint64 sumOrig = query.value(0).toLongLong();
-        qint64 sumComp = query.value(1).toLongLong();
-        
-        if (sumOrig > 0) {
-            totalOriginalMb = static_cast<double>(sumOrig) / (1024.0 * 1024.0);
-            totalCompressedMb = static_cast<double>(sumComp) / (1024.0 * 1024.0);
-            totalSavedMb = totalOriginalMb - totalCompressedMb;
-            savingsPct = (totalSavedMb / totalOriginalMb) * 100.0;
+    bool success = false;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QSqlQuery query(d);
+            bool ok = query.exec("SELECT SUM(original_size), SUM(compressed_size) FROM processed_files");
+            if (ok && query.next()) {
+                qint64 sumOrig = query.value(0).toLongLong();
+                qint64 sumComp = query.value(1).toLongLong();
+                
+                if (sumOrig > 0) {
+                    totalOriginalMb = static_cast<double>(sumOrig) / (1024.0 * 1024.0);
+                    totalCompressedMb = static_cast<double>(sumComp) / (1024.0 * 1024.0);
+                    totalSavedMb = totalOriginalMb - totalCompressedMb;
+                    savingsPct = (totalSavedMb / totalOriginalMb) * 100.0;
+                }
+                success = true;
+            }
         }
-        return true;
     }
-    return false;
+    closeDb();
+    return success;
 }
