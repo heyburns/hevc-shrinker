@@ -8,8 +8,8 @@ The interface is built using C++ and Qt, which means it starts up quickly and ru
 
 Many video converters will blindly re-process every file you give them, which takes hours and degrades quality. This app is designed to be much smarter about how it handles your library:
 
-*   It doesn't require any specialized knowledge of video codecs or complicated settings. It has one function and comes pre-configured for that function. Point it at a folder, and it just works.
-*   In the case that the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is deleted and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
+*   It doesn't require any specialized knowledge of video codecs or complicated settings. It has one function and comes pre-configured for that function. Point it at a folder, and it just works. Space savings of 30-50% are typical, although savings as high as 80% are possible, depending on the source.
+*   If the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is deleted and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
 *   It remembers what it has done by creating a small database file in your chosen folder. It calculates a unique fingerprint for each video so that if you run a scan later, it will instantly skip files that have already been shrunk.
 *   If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely. If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
 *   Automatic deinterlacing: It can automatically clean up old TV recordings by detecting combing and de-interlacing on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
@@ -27,10 +27,10 @@ Before running the application, you need to make sure you have FFmpeg and FFprob
 ## How to use the application
 
 1.  Launch the application.
-2.  Click Browse and select the folder containing your videos.
-3.  Click Scan Directory. The app will analyze all files in the folder and show you which ones are already compliant and which ones are pending.
+2.  Click Browse and select the folder containing your videos. 
+3.  Click Scan Directory. The app will recursively analyze all files in the folder and show you which ones are already compliant and which ones are pending.
 4.  Adjust your settings on the right sidebar:
-    *   CRF Quality: A slider to adjust compression. A higher value means smaller files but lower quality. The default is 28, which is generally the sweet spot for H.265.
+    *   CRF Quality: A slider to adjust compression. A higher value means smaller files but lower quality. The default is 28, which is generally the sweet spot for H.265. Use 23 if you really want identical visual quality.
     *   CPU Preset: Controls the CPU processing effort. Slower presets (like 'slow' or 'slower') will analyze the video in much more detail to produce higher quality output, but this extra detail will result in larger file sizes and much longer processing times. Faster presets process quickly but at the expense of quality. Medium is a good compromise.
     *   Filters: You can choose to downscale 4K files or enable double frame-rate de-interlacing (de-bob).
 5.  Click Start Queue. The app will process your videos one by one, showing you real-time progress, speed, and estimated completion times.
@@ -66,7 +66,7 @@ cmake --build build
 Once compiled, you can launch the application with `./build/hevc_shrinker`.
 
 ### macOS Compatibility Note
-While the code is written in cross-platform C++ and Qt6 and should theoretically build and run on macOS, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality, package app bundles, or troubleshoot macOS-specific path/dependency issues.
+While the code is written in cross-platform C++ and Qt6 and should theoretically build and run on macOS, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality, package app bundles, or troubleshoot macOS-specific path/dependency issues. You're on your own.
 
 ## Packaging and distribution
 
@@ -85,8 +85,17 @@ This script will collect the compiled executable, the required Qt6 libraries, co
 #### Installer version
 We have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Opening setup.iss in Inno Setup and compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.
 
-### Linux (Future Plans)
-When testing on Linux, we plan to support packaging the application into `.deb` (for Debian/Ubuntu), `.rpm` (for Fedora/RedHat), and `AppImage` formats to make installation and distribution across different Linux distributions as easy and seamless as possible.
+### Linux
+We have included a packaging script (`package_linux.py`) that compiles the application in release mode and bundles it into three major formats:
+*   **AppImage**: A standalone, self-contained executable that bundles the application and its Qt6 libraries, allowing it to run on almost any Linux distribution.
+*   **Debian Package (.deb)**: For Debian, Ubuntu, and derivatives, with automatic resolution of runtime dependencies (`ffmpeg`, `libqt6widgets6`, etc.).
+*   **Red Hat Package (.rpm)**: For Fedora, RHEL, and CentOS, with automatic package dependency resolution.
+
+To generate these packages from your build environment, run:
+```bash
+python3 package_linux.py
+```
+This will output the finalized packages in the `dist/` directory.
 
 ## License
 
