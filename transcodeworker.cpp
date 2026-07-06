@@ -362,7 +362,8 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             << "-map" << "0:a?"
             << "-map" << "0:s?"
             << "-map" << "0:t?";
-    cmdArgs << "-metadata" << "title=" << baseNoExt;
+    cmdArgs << "-metadata" << "title=" + baseNoExt
+            << tmpOut;
 
     // Execute transcode process
     emit logSignal(QString("Executing: %1 %2").arg(ffmpegBin, cmdArgs.join(" ")));
@@ -439,7 +440,13 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         if (QFile::exists(finalOut)) {
             QFile::remove(finalOut);
         }
-        QFile::rename(tmpOut, finalOut);
+        if (!safeMove(QDir::toNativeSeparators(tmpOut), QDir::toNativeSeparators(finalOut))) {
+            emit logSignal(QString("[ERROR] Failed to move temporary output to final location: %1").arg(finalOut));
+            moveToErrors(filepath, errorDir);
+            emit statusSignal(filepath, "Error", "File move failed");
+            emit fileDoneSignal(filepath, "Failed", oldSize, 0);
+            return false;
+        }
 
         // Record in database
         DatabaseManager db(m_dbPath);
