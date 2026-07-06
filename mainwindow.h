@@ -38,6 +38,7 @@ private slots:
     void processingFinished();
     void onFramePreviewRequested(const QString &filepath, double secs);
     void onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onPreviewDataAvailable();
     void togglePreview(bool checked);
 
 private:
@@ -64,7 +65,6 @@ private:
     QLabel *m_lblDashboardPct;
 
     QTableWidget *m_tableQueue;
-    QTextEdit *m_txtLog;
 
     // Collapsible Monitor Card widgets
     QGroupBox *m_statusCard;
@@ -76,6 +76,7 @@ private:
     QGroupBox *m_previewGroup;
     QLabel *m_lblPreview;
     QProcess *m_previewProcess;
+    QByteArray m_previewBuffer;
 
     // Logic members
     QString m_rootDir;

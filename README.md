@@ -1,6 +1,6 @@
 # HEVC Video Shrinker
 
-This is a desktop application designed to help you clean up and shrink your video libraries. If you have a large collection of movies, home videos, or TV recordings taking up hundreds of gigabytes on your hard drive, this tool will batch-convert them into highly efficient H.265 (HEVC) videos in the MKV format, drastically reducing their file size while keeping the visual quality intact. While it aims for visual transparency, this app prioritizes file size over quality and should not be used on collections where quality is the paramount concern, e.g. archival material.
+This is a desktop application designed to help you intelligently clean up and shrink your video libraries. If you have a large collection of movies or TV recordings taking up hundreds of gigabytes on your hard drive, this tool will batch-convert your collection into highly efficient H.265 (HEVC) videos in an MKV container, reducing file size while keeping the visual quality intact. While it aims for visual transparency, this app prioritizes file size over quality and should not be used on collections where quality is the paramount concern, e.g. archival material.
 
 The interface is built using C++ and Qt, which means it starts up quickly and runs natively on your system without any heavy web frameworks or background runtimes.
 
@@ -8,11 +8,13 @@ The interface is built using C++ and Qt, which means it starts up quickly and ru
 
 Many video converters will blindly re-process every file you give them, which takes hours and degrades quality. This app is designed to be much smarter about how it handles your library:
 
-*   It uses optimized encoder settings that aim for visual transparency, i.e., no visual quality loss to the human eye.
-*   It remembers what it has done: The app creates a small database file (called processed_files.db) in your chosen folder. It calculates a unique fingerprint for each video so that if you run a scan later, it will instantly skip files that have already been shrunk.
-*   It doesn't waste time: If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely.
-*   It copies what it can: If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
-*   Automatic deinterlacing: It can automatically clean up old TV recordings by detecting interlaced video lines and de-interlacing them on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
+*   In the case that the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is deleted and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
+*   It remembers what it has done by creating a small database file in your chosen folder. It calculates a unique fingerprint for each video so that if you run a scan later, it will instantly skip files that have already been shrunk.
+*   If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely.
+*   If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
+*   Automatic deinterlacing: It can automatically clean up old TV recordings by automatically detecting combing and de-interlacing them on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
+*   It can handle arcane formats like .flv, .avi, .asf, .wmv, and others, although they are always re-encoded and not size-checked against the source.
+*   Even though the goal is file size, quality is still important. It uses ffmpeg options that aim to help with visual transparency, i.e., no visual quality loss to the human eye. It prefers the higher quality fdk_aac for audio if your ffmpeg is compiled with that option, and it falls back to ffmpeg's default encoder if fdk_aac isn't present.
 
 ## Prerequisites
 
@@ -27,7 +29,7 @@ Before running the application, you need to make sure you have FFmpeg and FFprob
 1.  Launch the application.
 2.  Click Browse and select the folder containing your videos.
 3.  Click Scan Directory. The app will analyze all files in the folder and show you which ones are already compliant and which ones are pending.
-4.  Adjust your settings on the left sidebar:
+4.  Adjust your settings on the right sidebar:
     *   CRF Quality: A slider to adjust compression. A higher value means smaller files but lower quality. The default is 28, which is generally the sweet spot for H.265.
     *   CPU Preset: Controls the CPU processing effort. Slower presets (like 'slow' or 'slower') will analyze the video in much more detail to produce higher quality output, but this extra detail will result in larger file sizes and much longer processing times. Faster presets process quickly but at the expense of quality. Medium is a good compromise.
     *   Filters: You can choose to downscale 4K files or enable double frame-rate de-interlacing (de-bob).

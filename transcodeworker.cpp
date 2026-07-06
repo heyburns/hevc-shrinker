@@ -278,10 +278,17 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     // Determine target parameters
     bool isAlreadyHevc = (meta.vcodec == "hevc");
     bool isAlreadyAac = (meta.acodec == "aac" || !meta.hasAudio);
-    
     double effectiveFps = isInterlaced ? (meta.fps * 2.0) : meta.fps;
     bool bobbed = (effectiveFps >= 50.0 && m_settings["debob"].toBool());
-    bool needsDownscale = (meta.height > 1080 && m_settings["downscale"].toBool());
+    bool isPortrait = (meta.height > meta.width);
+    bool needsDownscale = false;
+    if (m_settings["downscale"].toBool()) {
+        if (isPortrait) {
+            needsDownscale = (meta.width > 1080 || meta.height > 1920);
+        } else {
+            needsDownscale = (meta.height > 1080 || meta.width > 1920);
+        }
+    }
 
     QString suffix = fileInfo.suffix().toLower();
     bool isObsoleteFormat = (suffix == "wmv" || suffix == "flv" || suffix == "avi" || suffix == "asf" || suffix == "f4v" || suffix == "divx");
@@ -300,18 +307,33 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     if (wantVideoCodec == "copy") {
         cmdArgs << "-c:v" << "copy";
     } else {
-        cmdArgs << "-c:v" << "libx265"
+        // Set the default video codec for all video streams to copy (protects cover art pictures)
+        // and override the first video stream (v:0) to transcode to libx265.
+        cmdArgs << "-c:v" << "copy"
+                << "-c:v:0" << "libx265"
                 << "-preset" << m_settings["preset"].toString()
                 << "-crf" << QString::number(m_settings["crf"].toInt())
                 << "-x265-params" << "profile=main10:no-sao=1:selective-sao=0:pmode=1:pme=1";
 
-        // Build video filters for encoding
+        // Build video filters for encoding (specifically apply only to v:0)
         QStringList videoFilters;
         if (isInterlaced) {
             videoFilters << "bwdif=mode=send_field:parity=-1:deint=all";
         }
         if (needsDownscale) {
-            videoFilters << "scale=-2:1080:flags=lanczos";
+            if (isPortrait) {
+                if (static_cast<double>(meta.height) / meta.width > 1920.0 / 1080.0) {
+                    videoFilters << "scale=-2:1920:flags=lanczos";
+                } else {
+                    videoFilters << "scale=1080:-2:flags=lanczos";
+                }
+            } else {
+                if (static_cast<double>(meta.width) / meta.height > 1920.0 / 1080.0) {
+                    videoFilters << "scale=1920:-2:flags=lanczos";
+                } else {
+                    videoFilters << "scale=-2:1080:flags=lanczos";
+                }
+            }
         }
         if (bobbed) {
             double targetFps = effectiveFps / 2.0;
@@ -319,8 +341,8 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
         videoFilters << "format=yuv420p10le";
         
-        cmdArgs << "-filter:v" << videoFilters.join(",");
-        emit logSignal(QString("Video filters applied: %1").arg(videoFilters.join(",")));
+        cmdArgs << "-filter:v:0" << videoFilters.join(",");
+        emit logSignal(QString("Video filters applied (to stream 0:v:0): %1").arg(videoFilters.join(",")));
     }
 
     // Audio compression setup
@@ -334,8 +356,13 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
     }
 
-    cmdArgs << "-c:s" << "copy" << "-map" << "0";
-    cmdArgs << "-metadata" << "title=" << tmpOut;
+    // Map all video streams (main video + cover art images)
+    cmdArgs << "-c:s" << "copy"
+            << "-map" << "0:v"
+            << "-map" << "0:a?"
+            << "-map" << "0:s?"
+            << "-map" << "0:t?";
+    cmdArgs << "-metadata" << "title=" << baseNoExt;
 
     // Execute transcode process
     emit logSignal(QString("Executing: %1 %2").arg(ffmpegBin, cmdArgs.join(" ")));
@@ -584,20 +611,34 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
 void TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashDir)
 {
     try {
-        QDir().mkpath(trashDir);
         QFileInfo fi(filepath);
+        QString fileDir = fi.absolutePath();
+        QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
+        
+        // Target folder inside trashDir preserving folder structure
+        QString targetTrashDir = trashDir;
+        if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
+            targetTrashDir = QDir(trashDir).filePath(relDir);
+        }
+
+        // Convert target directory to native separators to support UNC network shares on Windows
+        QDir().mkpath(QDir::toNativeSeparators(targetTrashDir));
         QString baseName = fi.fileName();
-        QString dest = QDir(trashDir).filePath(baseName);
+        QString dest = QDir(targetTrashDir).filePath(baseName);
         
         if (QFile::exists(dest)) {
             QString baseNoExt = fi.completeBaseName();
             QString ext = fi.suffix();
             qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-            dest = QDir(trashDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
+            dest = QDir(targetTrashDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
         }
 
-        if (safeMove(filepath, dest)) {
-            emit logSignal(QString("Original file moved to Trash: %1").arg(QFileInfo(dest).fileName()));
+        // Convert source and destination to native separators before moving
+        QString nativeSrc = QDir::toNativeSeparators(filepath);
+        QString nativeDest = QDir::toNativeSeparators(dest);
+
+        if (safeMove(nativeSrc, nativeDest)) {
+            emit logSignal(QString("Original file moved to Trash: %1").arg(QDir(trashDir).relativeFilePath(dest)));
         } else {
             emit logSignal(QString("[WARN] Failed to move %1 to Trash").arg(baseName));
         }
@@ -609,20 +650,34 @@ void TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashD
 void TranscodeWorker::moveToErrors(const QString &filepath, const QString &errorDir)
 {
     try {
-        QDir().mkpath(errorDir);
         QFileInfo fi(filepath);
+        QString fileDir = fi.absolutePath();
+        QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
+        
+        // Target folder inside errorDir preserving folder structure
+        QString targetErrorDir = errorDir;
+        if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
+            targetErrorDir = QDir(errorDir).filePath(relDir);
+        }
+
+        // Convert target directory to native separators to support UNC network shares on Windows
+        QDir().mkpath(QDir::toNativeSeparators(targetErrorDir));
         QString baseName = fi.fileName();
-        QString dest = QDir(errorDir).filePath(baseName);
+        QString dest = QDir(targetErrorDir).filePath(baseName);
         
         if (QFile::exists(dest)) {
             QString baseNoExt = fi.completeBaseName();
             QString ext = fi.suffix();
             qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-            dest = QDir(errorDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
+            dest = QDir(targetErrorDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
         }
 
-        if (safeMove(filepath, dest)) {
-            emit logSignal(QString("Failed file moved to .Errors: %1").arg(QFileInfo(dest).fileName()));
+        // Convert source and destination to native separators before moving
+        QString nativeSrc = QDir::toNativeSeparators(filepath);
+        QString nativeDest = QDir::toNativeSeparators(dest);
+
+        if (safeMove(nativeSrc, nativeDest)) {
+            emit logSignal(QString("Failed file moved to .Errors: %1").arg(QDir(errorDir).relativeFilePath(dest)));
         } else {
             emit logSignal(QString("[WARN] Failed to move %1 to Errors").arg(baseName));
         }

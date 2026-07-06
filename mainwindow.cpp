@@ -47,7 +47,7 @@ MainWindow::~MainWindow()
 
 void MainWindow::initUi()
 {
-    setWindowTitle("HEVC H.265 video shrinker");
+    setWindowTitle("HEVC Video Shrinker v1.0");
     resize(1050, 620);
 
     // Main central widget
@@ -95,17 +95,6 @@ void MainWindow::initUi()
     QHBoxLayout *bottomLayout = new QHBoxLayout(bottomDashboard);
     bottomLayout->setContentsMargins(0, 0, 0, 0);
     bottomLayout->setSpacing(10);
-
-    // Left Column: Log Output
-    QGroupBox *logGroup = new QGroupBox("Real-time Output Log");
-    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
-    logLayout->setContentsMargins(5, 10, 5, 5);
-
-    m_txtLog = new QTextEdit();
-    m_txtLog->setReadOnly(true);
-    m_txtLog->setStyleSheet("font-family: Consolas, monospace;");
-    logLayout->addWidget(m_txtLog);
-    bottomLayout->addWidget(logGroup, 2); // Stretch factor 2
 
     // Center Column: Live Progress Preview
     m_previewGroup = new QGroupBox("Live Progress Preview");
@@ -341,7 +330,7 @@ void MainWindow::checkDependencies()
     }
 
     if (ffmpeg.isEmpty() || ffprobe.isEmpty()) {
-        m_txtLog->append("[ERROR] Critical system tools missing. Please make sure ffmpeg/ffprobe are installed and present in your system environment PATH.");
+        logMessage("[ERROR] Critical system tools missing. Please make sure ffmpeg/ffprobe are installed and present in your system environment PATH.");
     }
 }
 
@@ -568,9 +557,7 @@ void MainWindow::resetSettings()
 
 void MainWindow::logMessage(const QString &message)
 {
-    m_txtLog->append(message);
-    QScrollBar *sb = m_txtLog->verticalScrollBar();
-    if (sb) sb->setValue(sb->maximum());
+    qDebug().noquote() << message;
 }
 
 void MainWindow::updateProgress(const QString &filepath, int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb)
@@ -750,19 +737,25 @@ void MainWindow::onFramePreviewRequested(const QString &filepath, double secs)
 
     if (!m_previewProcess) {
         m_previewProcess = new QProcess(this);
+        connect(m_previewProcess, &QProcess::readyReadStandardOutput, this, &MainWindow::onPreviewDataAvailable);
         connect(m_previewProcess, &QProcess::finished, this, &MainWindow::onPreviewProcessFinished);
     }
 
-    // Format the time as hh:mm:ss.ms
+    // Clear old PNG byte buffer
+    m_previewBuffer.clear();
+
+    // Format the time as hh:mm:ss.zzz (ensure seconds have two digits padded to prevent FFmpeg parsing failure)
     int h = static_cast<int>(secs / 3600);
     int m = static_cast<int>((secs - h * 3600) / 60);
-    double s = secs - h * 3600 - m * 60;
-    QString timeStr = QString("%1:%2:%3")
+    int s = static_cast<int>(secs - h * 3600 - m * 60);
+    int ms = static_cast<int>((secs - h * 3600 - m * 60 - s) * 1000);
+    QString timeStr = QString("%1:%2:%3.%4")
                       .arg(h, 2, 10, QChar('0'))
                       .arg(m, 2, 10, QChar('0'))
-                      .arg(s, 0, 'f', 3);
+                      .arg(s, 2, 10, QChar('0'))
+                      .arg(ms, 3, 10, QChar('0'));
 
-    // Run high-speed input seeking and pipe directly to stdout as PNG
+    // Run high-speed input seeking and pipe directly to stdout as PNG (buffered asynchronously)
     m_previewProcess->start(ffmpeg, {
         "-y",
         "-ss", timeStr,
@@ -775,19 +768,30 @@ void MainWindow::onFramePreviewRequested(const QString &filepath, double secs)
     });
 }
 
+void MainWindow::onPreviewDataAvailable()
+{
+    if (m_previewProcess) {
+        m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
+    }
+}
+
 void MainWindow::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    Q_UNUSED(exitCode);
-    if (exitStatus == QProcess::NormalExit && exitCode == 0 && m_previewProcess) {
-        QByteArray pngData = m_previewProcess->readAllStandardOutput();
-        if (!pngData.isEmpty()) {
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        // Read any remaining final buffer bytes
+        if (m_previewProcess) {
+            m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
+        }
+
+        if (!m_previewBuffer.isEmpty()) {
             QPixmap pixmap;
-            if (pixmap.loadFromData(pngData, "PNG")) {
+            if (pixmap.loadFromData(m_previewBuffer, "PNG")) {
                 QPixmap scaledPixmap = pixmap.scaled(m_lblPreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 m_lblPreview->setPixmap(scaledPixmap);
             }
         }
     }
+    m_previewBuffer.clear();
 }
 
 void MainWindow::togglePreview(bool checked)
@@ -801,6 +805,7 @@ void MainWindow::togglePreview(bool checked)
             if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
                 m_previewProcess->kill();
             }
+            m_previewBuffer.clear();
         }
     } else {
         m_previewGroup->setVisible(false);
