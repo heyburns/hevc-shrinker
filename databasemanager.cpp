@@ -43,7 +43,10 @@ QSqlDatabase DatabaseManager::db()
     }
     
     QSqlDatabase newDb = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
-    newDb.setDatabaseName(m_dbPath);
+    QString uriPath = m_dbPath;
+    uriPath.replace("\\", "/");
+    QString uriDbPath = QString("file:%1?nolock=1").arg(uriPath);
+    newDb.setDatabaseName(uriDbPath);
     if (!newDb.open()) {
         qWarning() << "Failed to open database:" << newDb.lastError().text();
     }
