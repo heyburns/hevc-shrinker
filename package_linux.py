@@ -148,7 +148,7 @@ Version: 1.0-1
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: qt6-base-dev, ffmpeg
+Depends: libqt6widgets6, libqt6sql6-sqlite, ffmpeg
 Maintainer: Alan <alan@example.com>
 Description: A native batch video compressor.
  Shrinks video libraries into optimized H.265 (HEVC) files
