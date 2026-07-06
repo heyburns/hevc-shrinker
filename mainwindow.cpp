@@ -347,7 +347,7 @@ void MainWindow::selectDirectory()
 
     try {
         QFileInfo dirInfo(m_rootDir);
-        if (dirInfo.exists() && dirInfo.isDir() && dirInfo.isWritable()) {
+        if (dirInfo.exists() && dirInfo.isDir()) {
             QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
             m_dbManager = new DatabaseManager(dbPath);
             logMessage(QString("Selected workspace: %1").arg(m_rootDir));

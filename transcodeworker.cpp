@@ -388,8 +388,10 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             
             if (fileInfo.suffix().toLower() == "mkv") {
                 // If original is already MKV, keep it in place
-                DatabaseManager db(m_dbPath);
-                db.recordProcessedFile(filepath, oldSize, oldSize, fileHash);
+                {
+                    DatabaseManager db(m_dbPath);
+                    db.recordProcessedFile(filepath, oldSize, oldSize, fileHash);
+                }
                 emit statusSignal(filepath, "Skipped", "Original kept (transcode grew)");
                 emit fileDoneSignal(filepath, "Skipped", oldSize, oldSize);
                 return true;
@@ -406,10 +408,10 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                 
                 if (remuxProc.waitForFinished() && remuxProc.exitCode() == 0 && QFile::exists(finalOut)) {
                     moveToTrash(filepath, trashDir);
-                    
-                    DatabaseManager db(m_dbPath);
-                    db.recordProcessedFile(finalOut, oldSize, QFileInfo(finalOut).size(), fileHash);
-                    
+                    {
+                        DatabaseManager db(m_dbPath);
+                        db.recordProcessedFile(finalOut, oldSize, QFileInfo(finalOut).size(), fileHash);
+                    }
                     emit statusSignal(filepath, "Completed", "Remuxed original (transcode grew)");
                     emit fileDoneSignal(filepath, "Completed", oldSize, QFileInfo(finalOut).size());
                     return true;
@@ -449,9 +451,10 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
 
         // Record in database
-        DatabaseManager db(m_dbPath);
-        db.recordProcessedFile(finalOut, oldSize, newSize, fileHash);
-
+        {
+            DatabaseManager db(m_dbPath);
+            db.recordProcessedFile(finalOut, oldSize, newSize, fileHash);
+        }
         emit fileDoneSignal(filepath, "Completed", oldSize, newSize);
         return true;
     } else {

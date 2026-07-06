@@ -8,11 +8,11 @@ The interface is built using C++ and Qt, which means it starts up quickly and ru
 
 Many video converters will blindly re-process every file you give them, which takes hours and degrades quality. This app is designed to be much smarter about how it handles your library:
 
+*   It doesn't require any specialized knowledge of video codecs or complicated settings. It has one function and comes pre-configured for that function. Point it at a folder, and it just works.
 *   In the case that the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is deleted and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
 *   It remembers what it has done by creating a small database file in your chosen folder. It calculates a unique fingerprint for each video so that if you run a scan later, it will instantly skip files that have already been shrunk.
-*   If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely.
-*   If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
-*   Automatic deinterlacing: It can automatically clean up old TV recordings by automatically detecting combing and de-interlacing them on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
+*   If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely. If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
+*   Automatic deinterlacing: It can automatically clean up old TV recordings by detecting combing and de-interlacing on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
 *   It can handle arcane formats like .flv, .avi, .asf, .wmv, and others, although they are always re-encoded and not size-checked against the source.
 *   Even though the goal is file size, quality is still important. It uses ffmpeg options that aim to help with visual transparency, i.e., no visual quality loss to the human eye. It prefers the higher quality fdk_aac for audio if your ffmpeg is compiled with that option, and it falls back to ffmpeg's default encoder if fdk_aac isn't present.
 
