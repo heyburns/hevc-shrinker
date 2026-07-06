@@ -113,7 +113,7 @@ void MainWindow::initUi()
     previewLayout->setContentsMargins(5, 10, 5, 5);
     m_lblPreview = new QLabel("Preview Off");
     m_lblPreview->setAlignment(Qt::AlignCenter);
-    m_lblPreview->setFixedSize(240, 135);
+    m_lblPreview->setFixedSize(240, 240);
     m_lblPreview->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
     previewLayout->addWidget(m_lblPreview);
     bottomLayout->addWidget(m_previewGroup, 0); // Keep fixed width
@@ -783,7 +783,8 @@ void MainWindow::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exi
         if (!pngData.isEmpty()) {
             QPixmap pixmap;
             if (pixmap.loadFromData(pngData, "PNG")) {
-                m_lblPreview->setPixmap(pixmap);
+                QPixmap scaledPixmap = pixmap.scaled(m_lblPreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                m_lblPreview->setPixmap(scaledPixmap);
             }
         }
     }
