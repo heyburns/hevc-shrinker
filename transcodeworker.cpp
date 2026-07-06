@@ -75,9 +75,10 @@ bool probeFileCompliance(const QString &filepath, const QString &ffprobeBin) {
 
 static bool detectFdkAac(const QString &ffmpegBin) {
     QProcess proc;
-    proc.start(ffmpegBin, {"-h", "encoder=libfdk_aac"});
+    proc.start(ffmpegBin, {"-encoders"});
     if (proc.waitForFinished()) {
-        return proc.exitCode() == 0;
+        QString out = QString::fromUtf8(proc.readAllStandardOutput());
+        return out.contains("libfdk_aac");
     }
     return false;
 }

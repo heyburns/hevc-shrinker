@@ -778,13 +778,12 @@ void MainWindow::onFramePreviewRequested(const QString &filepath, double secs)
 void MainWindow::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     Q_UNUSED(exitCode);
-    if (exitStatus == QProcess::NormalExit && m_previewProcess) {
+    if (exitStatus == QProcess::NormalExit && exitCode == 0 && m_previewProcess) {
         QByteArray pngData = m_previewProcess->readAllStandardOutput();
         if (!pngData.isEmpty()) {
             QPixmap pixmap;
             if (pixmap.loadFromData(pngData, "PNG")) {
                 m_lblPreview->setPixmap(pixmap);
-                return;
             }
         }
     }
