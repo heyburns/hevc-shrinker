@@ -1,0 +1,40 @@
+# CMake build outputs
+/build/
+/build-linux/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+/AppDir/
+/pack-appimage/
+hevc_shrinker.desktop
+
+# Generated distribution packages
+/dist/
+
+# Executables and libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# SQLite local database cache files
+*.db
+processed_files.db
+
+# IDE settings and logs
+.vscode/
+.idea/
+.gemini/
+*.log
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Editor swap files
+.*.swp
+.*.kate-swp
+*~
