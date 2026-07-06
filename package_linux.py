@@ -149,7 +149,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Depends: libqt6widgets6, libqt6sql6-sqlite, ffmpeg
-Maintainer: Alan <alan@example.com>
+Maintainer: HEVC Video Shrinker Developers <developer@example.com>
 Description: A native batch video compressor.
  Shrinks video libraries into optimized H.265 (HEVC) files
  using FFmpeg and stores processing metrics in SQLite.
@@ -240,7 +240,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/icons/hicolor/512x512/apps/hevc_shrinker.png
 
 %changelog
-* Sun Jul 05 2026 Alan <alan@example.com> - 1.0-1
+* Sun Jul 05 2026 HEVC Video Shrinker Developers <developer@example.com> - 1.0-1
 - Initial C++ package build
 """
     spec_path = os.path.join(rpmbuild_dir, "SPECS", "hevc_shrinker.spec")

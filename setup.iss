@@ -4,7 +4,7 @@
 [Setup]
 AppName=HEVC Video Shrinker
 AppVersion=1.0
-AppPublisher=Alan
+AppPublisher=HEVC Video Shrinker
 DefaultDirName={autopf}\HEVCVideoShrinker
 DefaultGroupName=HEVC Video Shrinker
 UninstallDisplayIcon={app}\hevc_shrinker.exe
