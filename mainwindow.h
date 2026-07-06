@@ -14,6 +14,7 @@
 #include <QCheckBox>
 #include <QVariantMap>
 #include <QStringList>
+#include <QProcess>
 #include "databasemanager.h"
 #include "transcodeworker.h"
 
@@ -35,6 +36,9 @@ private slots:
     void updateStatus(const QString &filepath, const QString &status, const QString &details);
     void fileDone(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize);
     void processingFinished();
+    void onFramePreviewRequested(const QString &filepath, double secs);
+    void onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void togglePreview(bool checked);
 
 private:
     // UI elements
@@ -49,6 +53,7 @@ private:
     QComboBox *m_comboPreset;
     QCheckBox *m_chkDownscale;
     QCheckBox *m_chkDebob;
+    QCheckBox *m_chkPreview;
 
     QLabel *m_lblFfmpegStatus;
     QLabel *m_lblFfprobeStatus;
@@ -68,6 +73,9 @@ private:
     QLabel *m_lblStatusTime;
     QLabel *m_lblStatusSize;
     QProgressBar *m_statusProgressBar;
+    QGroupBox *m_previewGroup;
+    QLabel *m_lblPreview;
+    QProcess *m_previewProcess;
 
     // Logic members
     QString m_rootDir;

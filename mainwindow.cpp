@@ -18,6 +18,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_dbManager(nullptr)
     , m_worker(nullptr)
+    , m_previewProcess(nullptr)
     , m_transcodeStartTime(0)
 {
     initUi();
@@ -35,6 +36,11 @@ MainWindow::~MainWindow()
     if (m_worker) {
         m_worker->stop();
         m_worker->wait();
+    }
+    if (m_previewProcess) {
+        m_previewProcess->kill();
+        m_previewProcess->waitForFinished();
+        delete m_previewProcess;
     }
     delete m_dbManager;
 }
@@ -84,7 +90,13 @@ void MainWindow::initUi()
     tableLayout->addWidget(m_tableQueue);
     rightSplitter->addWidget(tableGroup);
 
-    // 2. Log Output & Collapsible Monitor Group
+    // 2. Bottom Dashboard panel
+    QWidget *bottomDashboard = new QWidget();
+    QHBoxLayout *bottomLayout = new QHBoxLayout(bottomDashboard);
+    bottomLayout->setContentsMargins(0, 0, 0, 0);
+    bottomLayout->setSpacing(10);
+
+    // Left Column: Log Output
     QGroupBox *logGroup = new QGroupBox("Real-time Output Log");
     QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
     logLayout->setContentsMargins(5, 10, 5, 5);
@@ -93,8 +105,21 @@ void MainWindow::initUi()
     m_txtLog->setReadOnly(true);
     m_txtLog->setStyleSheet("font-family: Consolas, monospace;");
     logLayout->addWidget(m_txtLog);
+    bottomLayout->addWidget(logGroup, 2); // Stretch factor 2
 
-    // Collapsible Monitor Card
+    // Center Column: Live Progress Preview
+    m_previewGroup = new QGroupBox("Live Progress Preview");
+    QVBoxLayout *previewLayout = new QVBoxLayout(m_previewGroup);
+    previewLayout->setContentsMargins(5, 10, 5, 5);
+    m_lblPreview = new QLabel("Preview Off");
+    m_lblPreview->setAlignment(Qt::AlignCenter);
+    m_lblPreview->setFixedSize(240, 135);
+    m_lblPreview->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
+    previewLayout->addWidget(m_lblPreview);
+    bottomLayout->addWidget(m_previewGroup, 0); // Keep fixed width
+    m_previewGroup->setVisible(false); // Hidden initially
+
+    // Right Column: Active Transcode Monitor Card
     m_statusCard = new QGroupBox("Active Transcode Monitor");
     m_statusCard->setStyleSheet(
         "QGroupBox { font-weight: bold; border: 1px solid palette(mid); border-radius: 4px; margin-top: 6px; padding-top: 10px; background-color: palette(window); }"
@@ -140,11 +165,11 @@ void MainWindow::initUi()
     m_lblStatusSize->setStyleSheet("font-weight: bold;");
     cardLayout->addWidget(m_lblStatusSize, 3, 1, 1, 3);
 
-    logLayout->addWidget(m_statusCard);
+    bottomLayout->addWidget(m_statusCard, 2); // Stretch factor 2
     m_statusCard->setVisible(false); // Collapsed initially
 
-    rightSplitter->addWidget(logGroup);
-    rightSplitter->setSizes({450, 250});
+    rightSplitter->addWidget(bottomDashboard);
+    rightSplitter->setSizes({420, 200});
 
     // Right Panel: Control Sidebar
     QWidget *leftContainer = new QWidget();
@@ -196,6 +221,12 @@ void MainWindow::initUi()
     m_chkDebob = new QCheckBox("Double frame-rate de-bob (bwdif)");
     m_chkDebob->setChecked(true);
     ctrlLayout->addWidget(m_chkDebob);
+
+    // Live Progress Preview
+    m_chkPreview = new QCheckBox("Enable Live Progress Preview");
+    m_chkPreview->setChecked(false);
+    ctrlLayout->addWidget(m_chkPreview);
+    connect(m_chkPreview, &QCheckBox::toggled, this, &MainWindow::togglePreview);
 
     // Reset Buttons
     m_btnReset = new QPushButton("Restore settings back to defaults");
@@ -488,6 +519,7 @@ void MainWindow::startProcessing()
     settings["preset"] = m_comboPreset->currentText();
     settings["downscale"] = m_chkDownscale->isChecked();
     settings["debob"] = m_chkDebob->isChecked();
+    settings["live_preview"] = m_chkPreview->isChecked();
 
     QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
     m_worker = new TranscodeWorker(m_activeTranscodeQueue, m_rootDir, dbPath, settings, this);
@@ -498,6 +530,7 @@ void MainWindow::startProcessing()
     connect(m_worker, &TranscodeWorker::statusSignal, this, &MainWindow::updateStatus);
     connect(m_worker, &TranscodeWorker::fileDoneSignal, this, &MainWindow::fileDone);
     connect(m_worker, &TranscodeWorker::finishedSignal, this, &MainWindow::processingFinished);
+    connect(m_worker, &TranscodeWorker::previewFrameSignal, this, &MainWindow::onFramePreviewRequested);
     
     // Wire cleanup
     connect(m_worker, &TranscodeWorker::finished, m_worker, &TranscodeWorker::deleteLater);
@@ -511,6 +544,14 @@ void MainWindow::stopProcessing()
         logMessage("[ABORT] Stopping processing and cleaning up...");
         m_btnStop->setEnabled(false);
         m_statusCard->setVisible(false);
+        m_previewGroup->setVisible(false);
+        m_lblPreview->clear();
+        m_lblPreview->setText("Preview Off");
+
+        if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
+            m_previewProcess->kill();
+        }
+
         m_worker->stop();
     }
 }
@@ -521,6 +562,7 @@ void MainWindow::resetSettings()
     m_comboPreset->setCurrentText("medium");
     m_chkDownscale->setChecked(true);
     m_chkDebob->setChecked(true);
+    m_chkPreview->setChecked(false);
     logMessage("Configuration panel reset to default configurations.");
 }
 
@@ -587,6 +629,9 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
             m_lblStatusSize->setText("N/A");
             m_statusProgressBar->setValue(0);
             m_statusCard->setVisible(true);
+            m_previewGroup->setVisible(m_chkPreview->isChecked());
+            m_lblPreview->clear();
+            m_lblPreview->setText("Preview Off");
 
             for (int col = 0; col < 6; ++col) {
                 QTableWidgetItem *item = m_tableQueue->item(idx, col);
@@ -603,6 +648,9 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
 {
     int idx = findRowByFilepath(filepath);
     if (idx != -1) {
+        m_previewGroup->setVisible(false);
+        m_lblPreview->clear();
+        m_lblPreview->setText("Preview Off");
         m_tableQueue->setItem(idx, 1, new QTableWidgetItem(status));
         m_tableQueue->setItem(idx, 4, new QTableWidgetItem("Finished"));
         
@@ -685,4 +733,76 @@ int MainWindow::findRowByFilepath(const QString &filepath)
         }
     }
     return -1;
+}
+
+void MainWindow::onFramePreviewRequested(const QString &filepath, double secs)
+{
+    // If the preview setting is disabled or m_previewGroup is hidden, do nothing
+    if (!m_chkPreview->isChecked()) return;
+
+    // Check if the preview process is already running to avoid piling up
+    if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    QString ffmpeg = findDependency("ffmpeg");
+    if (ffmpeg.isEmpty()) return;
+
+    if (!m_previewProcess) {
+        m_previewProcess = new QProcess(this);
+        connect(m_previewProcess, &QProcess::finished, this, &MainWindow::onPreviewProcessFinished);
+    }
+
+    // Format the time as hh:mm:ss.ms
+    int h = static_cast<int>(secs / 3600);
+    int m = static_cast<int>((secs - h * 3600) / 60);
+    double s = secs - h * 3600 - m * 60;
+    QString timeStr = QString("%1:%2:%3")
+                      .arg(h, 2, 10, QChar('0'))
+                      .arg(m, 2, 10, QChar('0'))
+                      .arg(s, 0, 'f', 3);
+
+    // Run high-speed input seeking and pipe directly to stdout as PNG
+    m_previewProcess->start(ffmpeg, {
+        "-y",
+        "-ss", timeStr,
+        "-i", filepath,
+        "-vf", "scale=240:-1",
+        "-frames:v", "1",
+        "-f", "image2pipe",
+        "-vcodec", "png",
+        "-"
+    });
+}
+
+void MainWindow::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitCode);
+    if (exitStatus == QProcess::NormalExit && m_previewProcess) {
+        QByteArray pngData = m_previewProcess->readAllStandardOutput();
+        if (!pngData.isEmpty()) {
+            QPixmap pixmap;
+            if (pixmap.loadFromData(pngData, "PNG")) {
+                m_lblPreview->setPixmap(pixmap);
+                return;
+            }
+        }
+    }
+}
+
+void MainWindow::togglePreview(bool checked)
+{
+    if (m_worker && m_worker->isRunning()) {
+        m_worker->setLivePreviewEnabled(checked);
+        m_previewGroup->setVisible(checked);
+        if (!checked) {
+            m_lblPreview->clear();
+            m_lblPreview->setText("Preview Off");
+            if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
+                m_previewProcess->kill();
+            }
+        }
+    } else {
+        m_previewGroup->setVisible(false);
+    }
 }

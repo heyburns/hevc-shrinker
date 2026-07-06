@@ -14,6 +14,7 @@ public:
     ~TranscodeWorker();
 
     void stop();
+    void setLivePreviewEnabled(bool enabled);
 
 signals:
     void logSignal(const QString &message);
@@ -21,6 +22,7 @@ signals:
     void statusSignal(const QString &filepath, const QString &status, const QString &details);
     void fileDoneSignal(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize);
     void finishedSignal();
+    void previewFrameSignal(const QString &filepath, double secs);
 
 protected:
     void run() override;
@@ -31,6 +33,7 @@ private:
     QString m_dbPath;
     QVariantMap m_settings;
     std::atomic<bool> m_isRunning;
+    std::atomic<bool> m_livePreviewEnabled;
     QProcess *m_activeProcess;
     bool m_hasFdk;
 

@@ -168,9 +168,11 @@ TranscodeWorker::TranscodeWorker(const QStringList &fileQueue, const QString &ro
     , m_dbPath(dbPath)
     , m_settings(settings)
     , m_isRunning(false)
+    , m_livePreviewEnabled(false)
     , m_activeProcess(nullptr)
     , m_hasFdk(false)
 {
+    m_livePreviewEnabled = settings.value("live_preview", false).toBool();
 }
 
 TranscodeWorker::~TranscodeWorker()
@@ -181,6 +183,11 @@ TranscodeWorker::~TranscodeWorker()
 void TranscodeWorker::stop()
 {
     m_isRunning = false;
+}
+
+void TranscodeWorker::setLivePreviewEnabled(bool enabled)
+{
+    m_livePreviewEnabled = enabled;
 }
 
 void TranscodeWorker::run()
@@ -452,6 +459,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
     double lastFps = 0.0;
     double lastSpeed = 0.0;
     QString lastEta = "N/A";
+    double lastPreviewTime = -999.0;
 
     while (m_activeProcess->state() == QProcess::Running || m_activeProcess->bytesAvailable() > 0) {
         if (m_activeProcess->waitForReadyRead(100) || m_activeProcess->bytesAvailable() > 0) {
@@ -498,6 +506,12 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                         int m = timeMatch.captured(2).toInt();
                         double s = timeMatch.captured(3).toDouble();
                         double secs = h * 3600.0 + m * 60.0 + s;
+                        if (m_livePreviewEnabled) {
+                            if (secs >= lastPreviewTime + 3.0) {
+                                emit previewFrameSignal(filepath, secs);
+                                lastPreviewTime = secs;
+                            }
+                        }
                         int pct = static_cast<int>((secs / duration) * 100.0);
 
                         // Extract fps
