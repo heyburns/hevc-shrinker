@@ -40,7 +40,7 @@ private:
     bool processFile(const QString &filepath, const QString &ffmpegBin, const QString &ffprobeBin, const QString &trashDir, const QString &errorDir);
     bool runFfmpegProcess(const QStringList &cmd, double duration, const QString &filepath);
     
-    void moveToTrash(const QString &filepath, const QString &trashDir);
+    bool moveToTrash(const QString &filepath, const QString &trashDir);
     void moveToErrors(const QString &filepath, const QString &errorDir);
 };
 

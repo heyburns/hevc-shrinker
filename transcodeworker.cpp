@@ -411,7 +411,23 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                 });
                 
                 if (remuxProc.waitForFinished() && remuxProc.exitCode() == 0 && QFile::exists(finalOut)) {
-                    moveToTrash(filepath, trashDir);
+                    bool trashed = moveToTrash(filepath, trashDir);
+                    if (!trashed) {
+                        emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
+                        trashed = QFile::remove(filepath);
+                    }
+
+                    if (!trashed) {
+                        emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up remuxed output to prevent duplicates.").arg(filepath));
+                        if (QFile::exists(finalOut)) {
+                            QFile::remove(finalOut);
+                        }
+                        moveToErrors(filepath, errorDir);
+                        emit statusSignal(filepath, "Error", "Original delete failed");
+                        emit fileDoneSignal(filepath, "Failed", oldSize, 0);
+                        return false;
+                    }
+
                     {
                         DatabaseManager db(m_dbPath);
                         db.recordProcessedFile(finalOut, oldSize, QFileInfo(finalOut).size(), fileHash);
@@ -438,7 +454,21 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                             QString::number(ratio, 'f', 1)));
 
         // Move original to trash, rename temporary output to final
-        moveToTrash(filepath, trashDir);
+        bool trashed = moveToTrash(filepath, trashDir);
+        if (!trashed) {
+            emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
+            trashed = QFile::remove(filepath);
+        }
+
+        if (!trashed) {
+            emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up temporary output to prevent duplicates.").arg(filepath));
+            if (QFile::exists(tmpOut)) {
+                QFile::remove(tmpOut);
+            }
+            emit statusSignal(filepath, "Error", "Original delete failed");
+            emit fileDoneSignal(filepath, "Failed", oldSize, 0);
+            return false;
+        }
 
         QString finalOut = QDir(fileDir).filePath(baseNoExt + ".mkv");
         
@@ -622,7 +652,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
     return returnCode == 0;
 }
 
-void TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashDir)
+bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashDir)
 {
     try {
         QFileInfo fi(filepath);
@@ -653,12 +683,14 @@ void TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashD
 
         if (safeMove(nativeSrc, nativeDest)) {
             emit logSignal(QString("Original file moved to Trash: %1").arg(QDir(trashDir).relativeFilePath(dest)));
+            return true;
         } else {
             emit logSignal(QString("[WARN] Failed to move %1 to Trash").arg(baseName));
         }
     } catch (...) {
         emit logSignal(QString("[WARN] Failed to move %1 to Trash").arg(QFileInfo(filepath).fileName()));
     }
+    return false;
 }
 
 void TranscodeWorker::moveToErrors(const QString &filepath, const QString &errorDir)
