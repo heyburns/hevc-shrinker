@@ -26,8 +26,13 @@ public:
     
     bool recordProcessedFile(const QString &filepath, qint64 originalSize, qint64 compressedSize, const QString &hash);
     
-    // Get total savings
-    bool getSpaceSavings(double &totalOriginalMb, double &totalCompressedMb, double &totalSavedMb, double &savingsPct);
+    // Get workspace-scoped savings
+    bool getSpaceSavings(const QString &rootDir, double &totalOriginalMb, double &totalCompressedMb, double &totalSavedMb, double &savingsPct);
+
+    // Migration and reset database methods
+    void migrateLocalDatabase(const QString &localDbPath, const QString &rootDir);
+    bool clearScanCache(const QString &rootDir);
+    bool clearProcessedFiles(const QString &rootDir);
 
 private:
     QString m_dbPath;

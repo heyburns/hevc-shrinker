@@ -30,6 +30,8 @@ private slots:
     void startProcessing();
     void stopProcessing();
     void resetSettings();
+    void onResetDbClicked();
+    void onResetScoreboardClicked();
     
     void logMessage(const QString &message);
     void updateProgress(const QString &filepath, int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb);
@@ -49,6 +51,8 @@ private:
     QPushButton *m_btnStart;
     QPushButton *m_btnStop;
     QPushButton *m_btnReset;
+    QPushButton *m_btnResetDb;
+    QPushButton *m_btnResetScoreboard;
 
     QSpinBox *m_spinCrf;
     QComboBox *m_comboPreset;

@@ -265,8 +265,20 @@ void MainWindow::initUi()
 
     savingsLayout->addWidget(new QLabel("Savings ratio:"), 3, 0);
     m_lblDashboardPct = new QLabel("0.0%");
-    m_lblDashboardPct->setStyleSheet("font-weight: bold; color: green;");
     savingsLayout->addWidget(m_lblDashboardPct, 3, 1);
+
+    m_btnResetDb = new QPushButton("Reset Database");
+    m_btnResetDb->setEnabled(false);
+    connect(m_btnResetDb, &QPushButton::clicked, this, &MainWindow::onResetDbClicked);
+
+    m_btnResetScoreboard = new QPushButton("Reset Scoreboard");
+    m_btnResetScoreboard->setEnabled(false);
+    connect(m_btnResetScoreboard, &QPushButton::clicked, this, &MainWindow::onResetScoreboardClicked);
+
+    QHBoxLayout *resetButtonsLayout = new QHBoxLayout();
+    resetButtonsLayout->addWidget(m_btnResetDb);
+    resetButtonsLayout->addWidget(m_btnResetScoreboard);
+    savingsLayout->addLayout(resetButtonsLayout, 4, 0, 1, 2);
 
     leftLayout->addWidget(savingsGroup);
 
@@ -348,15 +360,19 @@ void MainWindow::selectDirectory()
     try {
         QFileInfo dirInfo(m_rootDir);
         if (dirInfo.exists() && dirInfo.isDir()) {
-            QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
-            m_dbManager = new DatabaseManager(dbPath);
+            m_dbManager = new DatabaseManager();
             logMessage(QString("Selected workspace: %1").arg(m_rootDir));
-            if (QFile::exists(dbPath)) {
-                logMessage(QString("Database detected: %1").arg(dbPath));
-            } else {
-                logMessage("Database not found. Creation deferred until encoding begins.");
+            
+            QString localDbPath = QDir(m_rootDir).filePath("processed_files.db");
+            if (QFile::exists(localDbPath)) {
+                logMessage("Local database detected in workspace. Migrating records to global database...");
+                m_dbManager->migrateLocalDatabase(localDbPath, m_rootDir);
+                logMessage("Migration complete. Local database has been renamed to processed_files.db.migrated.");
             }
+            
             m_btnScan->setEnabled(true);
+            m_btnResetDb->setEnabled(true);
+            m_btnResetScoreboard->setEnabled(true);
         } else {
             throw std::runtime_error("Directory does not exist or has no write permissions.");
         }
@@ -369,6 +385,8 @@ void MainWindow::selectDirectory()
         m_rootDir = "";
         m_dirInput->setText("");
         m_btnScan->setEnabled(false);
+        m_btnResetDb->setEnabled(false);
+        m_btnResetScoreboard->setEnabled(false);
     }
 
     m_tableQueue->setRowCount(0);
@@ -713,7 +731,7 @@ void MainWindow::updateSavingsDashboard()
 {
     if (m_dbManager) {
         double orig = 0.0, comp = 0.0, saved = 0.0, pct = 0.0;
-        if (m_dbManager->getSpaceSavings(orig, comp, saved, pct)) {
+        if (m_dbManager->getSpaceSavings(m_rootDir, orig, comp, saved, pct)) {
             m_lblDashboardOrig->setText(QString("%1 MB").arg(QString::number(orig, 'f', 1)));
             m_lblDashboardComp->setText(QString("%1 MB").arg(QString::number(comp, 'f', 1)));
             m_lblDashboardSaved->setText(QString("%1 MB").arg(QString::number(saved, 'f', 1)));
@@ -823,5 +841,48 @@ void MainWindow::togglePreview(bool checked)
         }
     } else {
         m_previewGroup->setVisible(false);
+    }
+}
+
+void MainWindow::onResetDbClicked()
+{
+    if (m_rootDir.isEmpty() || !m_dbManager) return;
+
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, 
+        "Reset Database Cache", 
+        "Are you sure you want to clear the metadata cache for this workspace?\n\nThis will force a full file-probing scan the next time you scan this directory.",
+        QMessageBox::Yes | QMessageBox::No
+    );
+
+    if (reply == QMessageBox::Yes) {
+        if (m_dbManager->clearScanCache(m_rootDir)) {
+            logMessage("Scan metadata cache cleared for this workspace.");
+            scanDirectory(); // Refresh the table queue
+        } else {
+            logMessage("[ERROR] Failed to clear metadata cache.");
+        }
+    }
+}
+
+void MainWindow::onResetScoreboardClicked()
+{
+    if (m_rootDir.isEmpty() || !m_dbManager) return;
+
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, 
+        "Reset Scoreboard", 
+        "Are you sure you want to clear the space savings history for this workspace?\n\nThis will reset the statistics to 0 and allow previously completed files to be transcoded again.",
+        QMessageBox::Yes | QMessageBox::No
+    );
+
+    if (reply == QMessageBox::Yes) {
+        if (m_dbManager->clearProcessedFiles(m_rootDir)) {
+            logMessage("Scoreboard transcode history cleared for this workspace.");
+            updateSavingsDashboard(); // Reset the labels to 0
+            scanDirectory(); // Re-scan the directory to mark files as pending
+        } else {
+            logMessage("[ERROR] Failed to clear transcode history.");
+        }
     }
 }

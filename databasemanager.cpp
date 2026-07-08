@@ -6,12 +6,21 @@
 #include <QDir>
 #include <QThread>
 #include <QDebug>
+#include <QStandardPaths>
+
+static QString getGlobalDbPath() {
+    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    QDir().mkpath(dataDir);
+    return QDir(dataDir).filePath("hevc_shrinker.db");
+}
 
 DatabaseManager::DatabaseManager(const QString &dbPath)
-    : m_dbPath(dbPath)
 {
+    Q_UNUSED(dbPath);
+    m_dbPath = getGlobalDbPath();
     // Generate a unique connection name per thread to ensure thread safety
     m_connectionName = QString("conn_%1").arg(QString::number((quintptr)QThread::currentThreadId()));
+    init(); // Auto-initialize tables immediately
 }
 
 DatabaseManager::~DatabaseManager()
@@ -71,8 +80,22 @@ bool DatabaseManager::init()
                 ")"
             );
             if (!ok) {
-                qWarning() << "Failed to create table:" << query.lastError().text();
+                qWarning() << "Failed to create processed_files table:" << query.lastError().text();
             }
+            
+            bool okCache = query.exec(
+                "CREATE TABLE IF NOT EXISTS scan_cache ("
+                "filepath TEXT PRIMARY KEY, "
+                "file_size INTEGER, "
+                "last_modified INTEGER, "
+                "is_compliant INTEGER"
+                ")"
+            );
+            if (!okCache) {
+                qWarning() << "Failed to create scan_cache table:" << query.lastError().text();
+            }
+            
+            ok = ok && okCache;
         }
     }
     closeDb();
@@ -83,29 +106,18 @@ ProcessedFileInfo DatabaseManager::getProcessedFileInfo(const QString &filepath)
 {
     ProcessedFileInfo info;
     
-    // Defer file creation: if file does not exist, return not found immediately
-    if (!QFile::exists(m_dbPath)) {
-        return info;
-    }
-
     {
         QSqlDatabase d = db();
         if (d.isOpen()) {
             QString absPath = QFileInfo(filepath).absoluteFilePath();
-            QFileInfo dbFileInfo(m_dbPath);
-            QDir rootDir = dbFileInfo.dir();
-            QString relpath = rootDir.relativeFilePath(absPath);
-            relpath.replace("\\", "/");
+            absPath.replace("\\", "/");
 
             QSqlQuery query(d);
             query.prepare(
                 "SELECT original_size, compressed_size, hash, filepath FROM processed_files "
-                "WHERE filepath = :filepath "
-                "   OR filepath = :relpath "
-                "   OR filepath LIKE '%' || :relpath"
+                "WHERE filepath = :filepath"
             );
             query.bindValue(":filepath", absPath);
-            query.bindValue(":relpath", relpath);
             
             if (query.exec() && query.next()) {
                 info.found = true;
@@ -142,28 +154,19 @@ ProcessedFileInfo DatabaseManager::getProcessedFileInfo(const QString &filepath)
 
 bool DatabaseManager::recordProcessedFile(const QString &filepath, qint64 originalSize, qint64 compressedSize, const QString &hash)
 {
-    // Auto-initialize SQLite schema if database file doesn't exist or is 0 bytes
-    QFileInfo dbInfo(m_dbPath);
-    if (!dbInfo.exists() || dbInfo.size() == 0) {
-        init();
-    }
-
     bool ok = false;
     {
         QSqlDatabase d = db();
         if (d.isOpen()) {
             QString absPath = QFileInfo(filepath).absoluteFilePath();
-            QFileInfo dbFileInfo(m_dbPath);
-            QDir rootDir = dbFileInfo.dir();
-            QString relpath = rootDir.relativeFilePath(absPath);
-            relpath.replace("\\", "/");
+            absPath.replace("\\", "/");
 
             QSqlQuery query(d);
             query.prepare(
                 "INSERT OR REPLACE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
                 "VALUES (:filepath, :orig, :comp, :hash, CURRENT_TIMESTAMP)"
             );
-            query.bindValue(":filepath", relpath);
+            query.bindValue(":filepath", absPath);
             query.bindValue(":orig", originalSize);
             query.bindValue(":comp", compressedSize);
             query.bindValue(":hash", hash);
@@ -178,25 +181,33 @@ bool DatabaseManager::recordProcessedFile(const QString &filepath, qint64 origin
     return ok;
 }
 
-bool DatabaseManager::getSpaceSavings(double &totalOriginalMb, double &totalCompressedMb, double &totalSavedMb, double &savingsPct)
+
+bool DatabaseManager::getSpaceSavings(const QString &rootDir, double &totalOriginalMb, double &totalCompressedMb, double &totalSavedMb, double &savingsPct)
 {
     totalOriginalMb = 0.0;
     totalCompressedMb = 0.0;
     totalSavedMb = 0.0;
     savingsPct = 0.0;
 
-    // Defer file creation: if file does not exist, return defaults immediately
-    if (!QFile::exists(m_dbPath)) {
-        return false;
-    }
-
     bool success = false;
     {
         QSqlDatabase d = db();
         if (d.isOpen()) {
+            QString prefix = QDir(rootDir).absolutePath();
+            prefix.replace("\\", "/");
+            if (!prefix.endsWith("/")) {
+                prefix += "/";
+            }
+
             QSqlQuery query(d);
-            bool ok = query.exec("SELECT SUM(original_size), SUM(compressed_size) FROM processed_files");
-            if (ok && query.next()) {
+            query.prepare(
+                "SELECT SUM(original_size), SUM(compressed_size) FROM processed_files "
+                "WHERE filepath LIKE :prefix || '%' OR filepath = :exact"
+            );
+            query.bindValue(":prefix", prefix);
+            query.bindValue(":exact", QDir(rootDir).absolutePath().replace("\\", "/"));
+
+            if (query.exec() && query.next()) {
                 qint64 sumOrig = query.value(0).toLongLong();
                 qint64 sumComp = query.value(1).toLongLong();
                 
@@ -216,19 +227,12 @@ bool DatabaseManager::getSpaceSavings(double &totalOriginalMb, double &totalComp
 
 int DatabaseManager::getCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified)
 {
-    if (!QFile::exists(m_dbPath)) {
-        return -1;
-    }
-
     int result = -1;
     {
         QSqlDatabase d = db();
         if (d.isOpen()) {
             QString absPath = QFileInfo(filepath).absoluteFilePath();
-            QFileInfo dbFileInfo(m_dbPath);
-            QDir rootDir = dbFileInfo.dir();
-            QString relpath = rootDir.relativeFilePath(absPath);
-            relpath.replace("\\", "/");
+            absPath.replace("\\", "/");
 
             QSqlQuery query(d);
             query.prepare(
@@ -237,7 +241,7 @@ int DatabaseManager::getCachedCompliance(const QString &filepath, qint64 fileSiz
                 "  AND file_size = :file_size "
                 "  AND last_modified = :last_modified"
             );
-            query.bindValue(":filepath", relpath);
+            query.bindValue(":filepath", absPath);
             query.bindValue(":file_size", fileSize);
             query.bindValue(":last_modified", lastModified);
 
@@ -252,35 +256,18 @@ int DatabaseManager::getCachedCompliance(const QString &filepath, qint64 fileSiz
 
 void DatabaseManager::setCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified, int isCompliant)
 {
-    if (!QFile::exists(m_dbPath)) {
-        return;
-    }
-
     {
         QSqlDatabase d = db();
         if (d.isOpen()) {
-            QSqlQuery checkQuery(d);
-            checkQuery.exec(
-                "CREATE TABLE IF NOT EXISTS scan_cache ("
-                "filepath TEXT PRIMARY KEY, "
-                "file_size INTEGER, "
-                "last_modified INTEGER, "
-                "is_compliant INTEGER"
-                ")"
-            );
-
             QString absPath = QFileInfo(filepath).absoluteFilePath();
-            QFileInfo dbFileInfo(m_dbPath);
-            QDir rootDir = dbFileInfo.dir();
-            QString relpath = rootDir.relativeFilePath(absPath);
-            relpath.replace("\\", "/");
+            absPath.replace("\\", "/");
 
             QSqlQuery query(d);
             query.prepare(
                 "INSERT OR REPLACE INTO scan_cache (filepath, file_size, last_modified, is_compliant) "
                 "VALUES (:filepath, :file_size, :last_modified, :is_compliant)"
             );
-            query.bindValue(":filepath", relpath);
+            query.bindValue(":filepath", absPath);
             query.bindValue(":file_size", fileSize);
             query.bindValue(":last_modified", lastModified);
             query.bindValue(":is_compliant", isCompliant);
@@ -291,4 +278,107 @@ void DatabaseManager::setCachedCompliance(const QString &filepath, qint64 fileSi
         }
     }
     closeDb();
+}
+
+void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QString &rootDir)
+{
+    if (!QFile::exists(localDbPath)) return;
+
+    qDebug() << "Migrating local database:" << localDbPath;
+    
+    // Open the local database
+    QString localConnName = QString("local_conn_%1").arg(QString::number((quintptr)QThread::currentThreadId()));
+    QSqlDatabase localDb = QSqlDatabase::addDatabase("QSQLITE", localConnName);
+    localDb.setDatabaseName(localDbPath);
+    
+    if (localDb.open()) {
+        QSqlQuery query(localDb);
+        if (query.exec("SELECT filepath, original_size, compressed_size, hash, processed_at FROM processed_files")) {
+            QSqlDatabase mainDb = db();
+            if (mainDb.isOpen()) {
+                QSqlQuery insertQuery(mainDb);
+                while (query.next()) {
+                    QString oldPath = query.value(0).toString();
+                    qint64 origSize = query.value(1).toLongLong();
+                    qint64 compSize = query.value(2).toLongLong();
+                    QString hash = query.value(3).toString();
+                    QString processedAt = query.value(4).toString();
+                    
+                    // Resolve old path to absolute path
+                    QString absPath = oldPath;
+                    if (QDir::isRelativePath(oldPath)) {
+                        absPath = QDir(rootDir).absoluteFilePath(oldPath);
+                    }
+                    absPath = QDir::cleanPath(absPath);
+                    absPath.replace("\\", "/");
+                    
+                    insertQuery.prepare(
+                        "INSERT OR IGNORE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
+                        "VALUES (:filepath, :original_size, :compressed_size, :hash, :processed_at)"
+                    );
+                    insertQuery.bindValue(":filepath", absPath);
+                    insertQuery.bindValue(":original_size", origSize);
+                    insertQuery.bindValue(":compressed_size", compSize);
+                    insertQuery.bindValue(":hash", hash);
+                    insertQuery.bindValue(":processed_at", processedAt);
+                    insertQuery.exec();
+                }
+            }
+        }
+        localDb.close();
+    }
+    QSqlDatabase::removeDatabase(localConnName);
+    
+    // Rename local database to .migrated so we don't migrate it again
+    QString migratedPath = localDbPath + ".migrated";
+    if (QFile::exists(migratedPath)) {
+        QFile::remove(migratedPath);
+    }
+    QFile::rename(localDbPath, migratedPath);
+}
+
+bool DatabaseManager::clearScanCache(const QString &rootDir)
+{
+    bool ok = false;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QString prefix = QDir(rootDir).absolutePath();
+            prefix.replace("\\", "/");
+            if (!prefix.endsWith("/")) {
+                prefix += "/";
+            }
+
+            QSqlQuery query(d);
+            query.prepare("DELETE FROM scan_cache WHERE filepath LIKE :prefix || '%' OR filepath = :exact");
+            query.bindValue(":prefix", prefix);
+            query.bindValue(":exact", QDir(rootDir).absolutePath().replace("\\", "/"));
+            ok = query.exec();
+        }
+    }
+    closeDb();
+    return ok;
+}
+
+bool DatabaseManager::clearProcessedFiles(const QString &rootDir)
+{
+    bool ok = false;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QString prefix = QDir(rootDir).absolutePath();
+            prefix.replace("\\", "/");
+            if (!prefix.endsWith("/")) {
+                prefix += "/";
+            }
+
+            QSqlQuery query(d);
+            query.prepare("DELETE FROM processed_files WHERE filepath LIKE :prefix || '%' OR filepath = :exact");
+            query.bindValue(":prefix", prefix);
+            query.bindValue(":exact", QDir(rootDir).absolutePath().replace("\\", "/"));
+            ok = query.exec();
+        }
+    }
+    closeDb();
+    return ok;
 }
