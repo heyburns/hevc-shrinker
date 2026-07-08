@@ -397,6 +397,8 @@ void MainWindow::selectDirectory()
 
 static void scanDirRecursive(const QString &dirPath, const QString &rootDir, const QStringList &videoExtensions, QList<ScannedFile> &scannedFiles)
 {
+    QCoreApplication::processEvents();
+
     // Ignore .Trash and .Errors subfolders
     if (dirPath.contains("/.Trash") || dirPath.contains("/.Errors") ||
         dirPath.contains("\\.Trash") || dirPath.contains("\\.Errors")) {
