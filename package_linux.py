@@ -98,7 +98,7 @@ Terminal=false
     found = False
     for f in os.listdir("."):
         if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker"):
-            dest = os.path.join("dist", f)
+            dest = os.path.join("dist", "HEVC_Video_Shrinker-1.0-x86_64.AppImage")
             if os.path.exists(dest):
                 os.remove(dest)
             shutil.move(f, dest)
