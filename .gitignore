@@ -10,7 +10,6 @@ Makefile
 hevc_shrinker.desktop
 
 # Generated distribution packages
-/dist/
 
 # Executables and libraries
 *.exe
