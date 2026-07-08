@@ -1,20 +1,23 @@
 # HEVC Video Shrinker
 
-This is a desktop application designed to help you intelligently clean up and shrink your video libraries. If you have a large collection of movies or TV recordings taking up hundreds of gigabytes on your hard drive, this tool will batch-convert your collection into highly efficient H.265 (HEVC) videos in an MKV container, reducing file size while keeping the visual quality intact. While it aims for visual transparency, this app prioritizes file size over quality and should not be used on collections where quality is the paramount concern, e.g. archival material.
+This is a desktop app version of the older bash script that used to live in this repo. If you've arrived here looking for the script, it's gone, replaced by this app.
+
+This is a cross-platform application that has one, and only one, function: to help you intelligently clean up and shrink large video libraries. If you have a large collection of movies or TV recordings taking up hundreds of gigabytes on your hard drive, this tool will batch-convert your collection into highly efficient H.265 (HEVC) videos in an MKV container, reducing file size while keeping the visual quality intact. While it aims for visual parity, transcoding is always lossy and this app prioritizes file size over quality. It should never be used on collections where quality is the paramount concern, e.g. archival material, or material that needs specialized treatment.
 
 The interface is built using C++ and Qt, which means it starts up quickly and runs natively on your system without any heavy web frameworks or background runtimes.
 
-## Why use this instead of other converters?
+## Why this app is different from other converters.
 
-Many video converters will blindly re-process every file you give them, which takes hours and degrades quality. This app is designed to be much smarter about how it handles your library:
+Many video converters will blindly re-process every file you give them, which takes hours, degrades quality, and requires intricate knowledge to set up and configure correctly. This app is designed to be much easier and smarter about how it handles your library:
 
-*   It doesn't require any specialized knowledge of video codecs or complicated settings. It has one function and comes pre-configured for that function. Point it at a folder, and it just works. Space savings of 30-50% are typical, although savings as high as 80% are possible, depending on the source.
-*   If the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is deleted and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
+*   It doesn't require any specialized knowledge of video codecs or complicated settings. It has one function and comes pre-configured for that function. Point it at a folder, and it just works. There aren't a lot of options, so you can't mess it up. Space savings of 30-50% are typical, although reductions as high as 80% or more are possible, depending on the source.
+*   If the hevc file comes out larger than the original (it's rare, but it does happen), the transcoded file is discarded and the original is remuxed into mkv. This ensures that your files will always either shrink or stay the same and never grow.
+*   Original files are never deleted, so you don't have to worry about mistakes. They are moved to a .Trash folder so you can delete them yourself once you are satisfied that everything has worked correctly. Any files that fail are moved to .Errors. 
 *   It remembers what it has done by creating a small database file in your chosen folder. It calculates a unique fingerprint for each video so that if you run a scan later, it will instantly skip files that have already been shrunk.
-*   If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely. If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
-*   Automatic deinterlacing: It can automatically clean up old TV recordings by detecting combing and de-interlacing on the fly. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
-*   It can handle arcane formats like .flv, .avi, .asf, .wmv, and others, although they are always re-encoded and not size-checked against the source.
-*   Even though the goal is file size, quality is still important. It uses ffmpeg options that aim to help with visual transparency, i.e., no visual quality loss to the human eye. It prefers the higher quality fdk_aac for audio if your ffmpeg is compiled with that option, and it falls back to ffmpeg's default encoder if fdk_aac isn't present.
+*   It doesn't waste time. If a video is already encoded in H.265 and has compatible AAC audio, the app recognizes this and skips it entirely. If a video is already in H.265 format but has an older audio format (like AC3 or DTS), it will only transcode the audio to AAC and copy the video stream directly. This avoids unnecessary video re-compression, preserves 100% of the video quality, and finishes in seconds rather than hours.
+*   Automatic deinterlacing: It can automatically clean up old TV recordings by detecting combing and de-interlacing on the fly. This is automatic and you don't have to do anything. If you don't want this, don't feed it interlaced videos. It can also downscale bulky 4K videos to a standard 1080p resolution to save even more space.
+*   It can handle arcane formats like .flv, .avi, .asf, .wmv, and others, although they are always transcoded and not size-checked against the source.
+*   Even though the goal is file size, quality is still important. It uses encoding options that aim to help with visual parity, i.e., no visual quality loss to the human eye. It prefers the higher quality fdk_aac for audio if your ffmpeg is compiled with that option, and it falls back to ffmpeg's default encoder if fdk_aac isn't present.
 
 ## Prerequisites
 

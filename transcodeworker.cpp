@@ -382,7 +382,8 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         qint64 newSize = QFileInfo(tmpOut).size();
         
         // If we re-encoded the video and the file grew, discard the transcode to prevent bloat!
-        if (wantVideoCodec == "libx265" && newSize >= oldSize) {
+        // (Unless it is an obsolete format, which we must always transcode and never remux)
+        if (wantVideoCodec == "libx265" && newSize >= oldSize && !isObsoleteFormat) {
             emit logSignal(QString("[NOTICE] Transcoded file (%1 MB) is larger than or equal to original (%2 MB). Discarding bloated transcode.")
                            .arg(QString::number(static_cast<double>(newSize)/(1024.0*1024.0), 'f', 1),
                                 QString::number(static_cast<double>(oldSize)/(1024.0*1024.0), 'f', 1)));
