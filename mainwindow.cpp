@@ -439,7 +439,21 @@ void MainWindow::scanDirectory()
 
         // Run compliance probe
         if (!isProcessed && !ffprobeBin.isEmpty()) {
-            isCompliant = probeFileCompliance(filepath, ffprobeBin);
+            qint64 fileSize = fi.size();
+            qint64 lastModified = fi.lastModified().toSecsSinceEpoch();
+            int cached = -1;
+            if (m_dbManager) {
+                cached = m_dbManager->getCachedCompliance(filepath, fileSize, lastModified);
+            }
+
+            if (cached != -1) {
+                isCompliant = (cached == 1);
+            } else {
+                isCompliant = probeFileCompliance(filepath, ffprobeBin);
+                if (m_dbManager) {
+                    m_dbManager->setCachedCompliance(filepath, fileSize, lastModified, isCompliant ? 1 : 0);
+                }
+            }
             if (isCompliant) {
                 compSizeDisplay = origSizeDisplay; // Same size
             }

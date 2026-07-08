@@ -213,3 +213,82 @@ bool DatabaseManager::getSpaceSavings(double &totalOriginalMb, double &totalComp
     closeDb();
     return success;
 }
+
+int DatabaseManager::getCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified)
+{
+    if (!QFile::exists(m_dbPath)) {
+        return -1;
+    }
+
+    int result = -1;
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QString absPath = QFileInfo(filepath).absoluteFilePath();
+            QFileInfo dbFileInfo(m_dbPath);
+            QDir rootDir = dbFileInfo.dir();
+            QString relpath = rootDir.relativeFilePath(absPath);
+            relpath.replace("\\", "/");
+
+            QSqlQuery query(d);
+            query.prepare(
+                "SELECT is_compliant FROM scan_cache "
+                "WHERE filepath = :filepath "
+                "  AND file_size = :file_size "
+                "  AND last_modified = :last_modified"
+            );
+            query.bindValue(":filepath", relpath);
+            query.bindValue(":file_size", fileSize);
+            query.bindValue(":last_modified", lastModified);
+
+            if (query.exec() && query.next()) {
+                result = query.value(0).toInt();
+            }
+        }
+    }
+    closeDb();
+    return result;
+}
+
+void DatabaseManager::setCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified, int isCompliant)
+{
+    if (!QFile::exists(m_dbPath)) {
+        return;
+    }
+
+    {
+        QSqlDatabase d = db();
+        if (d.isOpen()) {
+            QSqlQuery checkQuery(d);
+            checkQuery.exec(
+                "CREATE TABLE IF NOT EXISTS scan_cache ("
+                "filepath TEXT PRIMARY KEY, "
+                "file_size INTEGER, "
+                "last_modified INTEGER, "
+                "is_compliant INTEGER"
+                ")"
+            );
+
+            QString absPath = QFileInfo(filepath).absoluteFilePath();
+            QFileInfo dbFileInfo(m_dbPath);
+            QDir rootDir = dbFileInfo.dir();
+            QString relpath = rootDir.relativeFilePath(absPath);
+            relpath.replace("\\", "/");
+
+            QSqlQuery query(d);
+            query.prepare(
+                "INSERT OR REPLACE INTO scan_cache (filepath, file_size, last_modified, is_compliant) "
+                "VALUES (:filepath, :file_size, :last_modified, :is_compliant)"
+            );
+            query.bindValue(":filepath", relpath);
+            query.bindValue(":file_size", fileSize);
+            query.bindValue(":last_modified", lastModified);
+            query.bindValue(":is_compliant", isCompliant);
+
+            if (!query.exec()) {
+                qWarning() << "Failed to set cached compliance:" << query.lastError().text();
+            }
+        }
+    }
+    closeDb();
+}

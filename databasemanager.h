@@ -21,6 +21,9 @@ public:
     // Retrieve file info. If missing size details, we backfill them from disk.
     ProcessedFileInfo getProcessedFileInfo(const QString &filepath);
     
+    int getCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified);
+    void setCachedCompliance(const QString &filepath, qint64 fileSize, qint64 lastModified, int isCompliant);
+    
     bool recordProcessedFile(const QString &filepath, qint64 originalSize, qint64 compressedSize, const QString &hash);
     
     // Get total savings
