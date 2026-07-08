@@ -413,29 +413,36 @@ void MainWindow::scanDirectory()
 
     QDirIterator it(m_rootDir, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
-        QString path = it.next();
+        it.next();
+        QFileInfo fi = it.fileInfo();
+        QString path = fi.absoluteFilePath();
         // Ignore .Trash and .Errors subfolders
         if (path.contains("/.Trash/") || path.contains("/.Errors/") ||
             path.contains("\\.Trash\\") || path.contains("\\.Errors\\")) {
             continue;
         }
 
-        QFileInfo fi(path);
         if (videoExtensions.contains(fi.suffix().toLower())) {
-            m_scannedFiles.append(fi.absoluteFilePath());
+            ScannedFile sf;
+            sf.absolutePath = path;
+            sf.filename = fi.fileName();
+            sf.relPath = QDir(m_rootDir).relativeFilePath(path);
+            sf.size = fi.size();
+            sf.lastModified = fi.lastModified().toSecsSinceEpoch();
+            m_scannedFiles.append(sf);
         }
     }
 
     logMessage(QString("Found %1 video files.").arg(m_scannedFiles.count()));
 
+    m_tableQueue->setUpdatesEnabled(false); // OPTIMIZATION: Disable QTableWidget updates to prevent massive rendering lag
     m_tableQueue->setRowCount(m_scannedFiles.count());
     for (int idx = 0; idx < m_scannedFiles.count(); ++idx) {
-        QString filepath = m_scannedFiles[idx];
-        QFileInfo fi(filepath);
-        QString filename = fi.fileName();
-        
-        QString relPath = QDir(m_rootDir).relativeFilePath(filepath);
-        double sizeMb = static_cast<double>(fi.size()) / (1024.0 * 1024.0);
+        const ScannedFile &sf = m_scannedFiles[idx];
+        QString filepath = sf.absolutePath;
+        QString filename = sf.filename;
+        QString relPath = sf.relPath;
+        double sizeMb = static_cast<double>(sf.size) / (1024.0 * 1024.0);
 
         bool isProcessed = false;
         bool isCompliant = false;
@@ -457,8 +464,8 @@ void MainWindow::scanDirectory()
 
         // Run compliance probe
         if (!isProcessed && !ffprobeBin.isEmpty()) {
-            qint64 fileSize = fi.size();
-            qint64 lastModified = fi.lastModified().toSecsSinceEpoch();
+            qint64 fileSize = sf.size;
+            qint64 lastModified = sf.lastModified;
             int cached = -1;
             if (m_dbManager) {
                 cached = m_dbManager->getCachedCompliance(filepath, fileSize, lastModified);
@@ -517,6 +524,7 @@ void MainWindow::scanDirectory()
             }
         }
     }
+    m_tableQueue->setUpdatesEnabled(true); // OPTIMIZATION: Re-enable QTableWidget updates
 
     updateSavingsDashboard();
     logMessage(QString("Scan complete. %1 files queued for processing.").arg(m_activeTranscodeQueue.count()));

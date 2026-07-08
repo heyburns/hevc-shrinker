@@ -148,7 +148,6 @@ ProcessedFileInfo DatabaseManager::getProcessedFileInfo(const QString &filepath)
             }
         }
     }
-    closeDb();
     return info;
 }
 
@@ -177,7 +176,6 @@ bool DatabaseManager::recordProcessedFile(const QString &filepath, qint64 origin
             }
         }
     }
-    closeDb();
     return ok;
 }
 
@@ -221,7 +219,6 @@ bool DatabaseManager::getSpaceSavings(const QString &rootDir, double &totalOrigi
             }
         }
     }
-    closeDb();
     return success;
 }
 
@@ -250,7 +247,6 @@ int DatabaseManager::getCachedCompliance(const QString &filepath, qint64 fileSiz
             }
         }
     }
-    closeDb();
     return result;
 }
 
@@ -277,7 +273,6 @@ void DatabaseManager::setCachedCompliance(const QString &filepath, qint64 fileSi
             }
         }
     }
-    closeDb();
 }
 
 void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QString &rootDir)
@@ -356,7 +351,6 @@ bool DatabaseManager::clearScanCache(const QString &rootDir)
             ok = query.exec();
         }
     }
-    closeDb();
     return ok;
 }
 
@@ -379,6 +373,5 @@ bool DatabaseManager::clearProcessedFiles(const QString &rootDir)
             ok = query.exec();
         }
     }
-    closeDb();
     return ok;
 }

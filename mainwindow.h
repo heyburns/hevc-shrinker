@@ -18,6 +18,14 @@
 #include "databasemanager.h"
 #include "transcodeworker.h"
 
+struct ScannedFile {
+    QString absolutePath;
+    QString filename;
+    QString relPath;
+    qint64 size = 0;
+    qint64 lastModified = 0;
+};
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -86,7 +94,7 @@ private:
     QString m_rootDir;
     DatabaseManager *m_dbManager;
     TranscodeWorker *m_worker;
-    QStringList m_scannedFiles;
+    QList<ScannedFile> m_scannedFiles;
     QStringList m_activeTranscodeQueue;
     qint64 m_transcodeStartTime;
 
