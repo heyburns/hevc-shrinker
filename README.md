@@ -74,7 +74,7 @@ While the code is written in cross-platform C++ and Qt6 and should theoretically
 ## Packaging and distribution
 
 ### Windows
-We have included two ways to package this application for distribution on Windows:
+I have included two ways to package this application for distribution on Windows:
 
 #### Portable version (ZIP)
 If you want to run the app from a thumb drive or share it easily without an installer:
@@ -83,13 +83,13 @@ If you want to run the app from a thumb drive or share it easily without an inst
    ```powershell
    python package_portable.py
    ```
-This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
+This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_1.0_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
 
 #### Installer version
-We have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Opening setup.iss in Inno Setup and compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.
+I have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Opening setup.iss in Inno Setup and compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.
 
 ### Linux
-We have included a packaging script (`package_linux.py`) that compiles the application in release mode and bundles it into three major formats:
+I have included a packaging script (`package_linux.py`) that compiles the application in release mode and bundles it into three major formats:
 *   **AppImage**: A standalone, self-contained executable that bundles the application and its Qt6 libraries, allowing it to run on almost any Linux distribution.
 *   **Debian Package (.deb)**: For Debian, Ubuntu, and derivatives, with automatic resolution of runtime dependencies (`ffmpeg`, `libqt6widgets6`, etc.).
 *   **Red Hat Package (.rpm)**: For Fedora, RHEL, and CentOS, with automatic package dependency resolution.
