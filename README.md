@@ -35,7 +35,7 @@ Before running the application, you need to make sure you have FFmpeg and FFprob
 4.  Adjust your settings on the right sidebar:
     *   CRF Quality: A slider to adjust compression. A higher value means smaller files but lower quality. The default is 28, which is generally the sweet spot for H.265. Use 23 if you really want identical visual quality.
     *   CPU Preset: Controls the CPU processing effort. Slower presets (like 'slow' or 'slower') will analyze the video in much more detail to produce higher quality output, but this extra detail will result in larger file sizes and much longer processing times. Faster presets process quickly but at the expense of quality. Medium is a good compromise.
-    *   Filters: You can choose to downscale 4K files or enable double frame-rate de-interlacing (de-bob).
+    *   Filters: You can choose to downscale 4K files or enable high frame-rate de-interlacing (de-bob).
 5.  Click Start Queue. The app will process your videos one by one, showing you real-time progress, speed, and estimated completion times.
 6.  The original files will be safely moved to a hidden folder called .Trash inside your directory, so you can review the results before deleting them permanently. Any errors will be moved to .Errors.
 
