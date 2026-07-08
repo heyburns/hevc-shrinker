@@ -395,6 +395,33 @@ void MainWindow::selectDirectory()
     m_btnStart->setEnabled(false);
 }
 
+static void scanDirRecursive(const QString &dirPath, const QString &rootDir, const QStringList &videoExtensions, QList<ScannedFile> &scannedFiles)
+{
+    // Ignore .Trash and .Errors subfolders
+    if (dirPath.contains("/.Trash") || dirPath.contains("/.Errors") ||
+        dirPath.contains("\\.Trash") || dirPath.contains("\\.Errors")) {
+        return;
+    }
+
+    QDir dir(dirPath);
+    QFileInfoList list = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo &fi : list) {
+        if (fi.isDir()) {
+            scanDirRecursive(fi.absoluteFilePath(), rootDir, videoExtensions, scannedFiles);
+        } else {
+            if (videoExtensions.contains(fi.suffix().toLower())) {
+                ScannedFile sf;
+                sf.absolutePath = fi.absoluteFilePath();
+                sf.filename = fi.fileName();
+                sf.relPath = QDir(rootDir).relativeFilePath(sf.absolutePath);
+                sf.size = fi.size();
+                sf.lastModified = fi.lastModified().toSecsSinceEpoch();
+                scannedFiles.append(sf);
+            }
+        }
+    }
+}
+
 void MainWindow::scanDirectory()
 {
     if (m_rootDir.isEmpty()) return;
@@ -411,27 +438,7 @@ void MainWindow::scanDirectory()
         "mp4", "mkv", "wmv", "avi", "mov", "flv", "mpeg", "mpg", "vid", "m4v", "asf", "f4v", "divx"
     };
 
-    QDirIterator it(m_rootDir, QDir::Files, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        QFileInfo fi = it.fileInfo();
-        QString path = fi.absoluteFilePath();
-        // Ignore .Trash and .Errors subfolders
-        if (path.contains("/.Trash/") || path.contains("/.Errors/") ||
-            path.contains("\\.Trash\\") || path.contains("\\.Errors\\")) {
-            continue;
-        }
-
-        if (videoExtensions.contains(fi.suffix().toLower())) {
-            ScannedFile sf;
-            sf.absolutePath = path;
-            sf.filename = fi.fileName();
-            sf.relPath = QDir(m_rootDir).relativeFilePath(path);
-            sf.size = fi.size();
-            sf.lastModified = fi.lastModified().toSecsSinceEpoch();
-            m_scannedFiles.append(sf);
-        }
-    }
+    scanDirRecursive(m_rootDir, m_rootDir, videoExtensions, m_scannedFiles);
 
     logMessage(QString("Found %1 video files.").arg(m_scannedFiles.count()));
 
