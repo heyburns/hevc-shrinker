@@ -437,6 +437,10 @@ void MainWindow::scanDirectory()
 
     m_tableQueue->setUpdatesEnabled(false); // OPTIMIZATION: Disable QTableWidget updates to prevent massive rendering lag
     m_tableQueue->setRowCount(m_scannedFiles.count());
+    
+    int cacheHits = 0;
+    int cacheMisses = 0;
+
     for (int idx = 0; idx < m_scannedFiles.count(); ++idx) {
         const ScannedFile &sf = m_scannedFiles[idx];
         QString filepath = sf.absolutePath;
@@ -473,7 +477,9 @@ void MainWindow::scanDirectory()
 
             if (cached != -1) {
                 isCompliant = (cached == 1);
+                cacheHits++;
             } else {
+                cacheMisses++;
                 isCompliant = probeFileCompliance(filepath, ffprobeBin);
                 if (m_dbManager) {
                     m_dbManager->setCachedCompliance(filepath, fileSize, lastModified, isCompliant ? 1 : 0);
@@ -527,7 +533,8 @@ void MainWindow::scanDirectory()
     m_tableQueue->setUpdatesEnabled(true); // OPTIMIZATION: Re-enable QTableWidget updates
 
     updateSavingsDashboard();
-    logMessage(QString("Scan complete. %1 files queued for processing.").arg(m_activeTranscodeQueue.count()));
+    logMessage(QString("Scan complete. Cache Hits: %1, Cache Misses: %2. %3 files queued for processing.")
+        .arg(cacheHits).arg(cacheMisses).arg(m_activeTranscodeQueue.count()));
 
     m_btnStart->setEnabled(m_activeTranscodeQueue.count() > 0);
 }
