@@ -207,7 +207,7 @@ void MainWindow::initUi()
     ctrlLayout->addWidget(m_chkDownscale);
 
     // Deinterlacing Filter (De-bob)
-    m_chkDebob = new QCheckBox("Double frame-rate de-bob (bwdif)");
+    m_chkDebob = new QCheckBox("High frame-rate de-bob (bwdif)");
     m_chkDebob->setChecked(true);
     ctrlLayout->addWidget(m_chkDebob);
 
