@@ -377,6 +377,7 @@ void MainWindow::initUi()
     m_spinConcurrent->setRange(1, 16);
     m_spinConcurrent->setValue(1);
     ctrlLayout->addWidget(m_spinConcurrent);
+    connect(m_spinConcurrent, &QSpinBox::valueChanged, this, &MainWindow::onConcurrentChanged);
 
     // Reset Buttons
     m_btnReset = new QPushButton("Restore settings back to defaults");
@@ -808,9 +809,24 @@ void MainWindow::onWorkerFinished()
     }
 
     if (m_isQueueRunning && !m_pendingQueue.isEmpty()) {
-        startNextQueueJob();
+        if (m_workers.count() < m_spinConcurrent->value()) {
+            startNextQueueJob();
+        }
     } else if (m_pendingQueue.isEmpty() && m_workers.isEmpty()) {
         processingFinished();
+    }
+}
+
+void MainWindow::onConcurrentChanged(int val)
+{
+    if (!m_isQueueRunning) return;
+
+    int activeCount = m_workers.count();
+    if (activeCount < val) {
+        int spawnCount = val - activeCount;
+        for (int i = 0; i < spawnCount; ++i) {
+            startNextQueueJob();
+        }
     }
 }
 

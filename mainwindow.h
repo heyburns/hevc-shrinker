@@ -81,6 +81,7 @@ private slots:
     void onWorkerFinished();
     void onWorkerPreviewFrameRequested(const QString &filepath, double secs);
     void togglePreview(bool checked);
+    void onConcurrentChanged(int val);
 
 private:
     // UI elements
