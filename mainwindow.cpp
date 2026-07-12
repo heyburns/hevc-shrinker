@@ -752,6 +752,12 @@ void MainWindow::startNextQueueJob()
     settings["debob"] = m_chkDebob->isChecked();
     settings["live_preview"] = m_chkPreview->isChecked();
 
+    // Dynamically partition CPU threads to avoid context switching/cache over-provisioning
+    int totalCores = QThread::idealThreadCount();
+    int maxConcurrent = m_spinConcurrent->value();
+    int threadsPerJob = qMax(1, totalCores / maxConcurrent);
+    settings["threads"] = threadsPerJob;
+
     QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
     TranscodeWorker *worker = new TranscodeWorker(QStringList{filepath}, m_rootDir, dbPath, settings, this);
     worker->setProperty("filepath", filepath);

@@ -302,19 +302,29 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     
     // Build arguments
     QStringList cmdArgs;
-    cmdArgs << "-y" << "-filter_threads" << "4" << "-i" << filepath;
+    int threads = m_settings.value("threads", 0).toInt();
+    if (threads > 0) {
+        cmdArgs << "-y" << "-threads" << QString::number(threads) << "-filter_threads" << QString::number(qMax(1, threads / 2)) << "-i" << filepath;
+    } else {
+        cmdArgs << "-y" << "-filter_threads" << "4" << "-i" << filepath;
+    }
 
     // Video compression and filter setup
     if (wantVideoCodec == "copy") {
         cmdArgs << "-c:v" << "copy";
     } else {
+        QString x265Params = "profile=main10:no-sao=1:selective-sao=0:pmode=1:pme=1";
+        if (threads > 0) {
+            x265Params += QString(":pools=%1").arg(threads);
+        }
+
         // Set the default video codec for all video streams to copy (protects cover art pictures)
         // and override the first video stream (v:0) to transcode to libx265.
         cmdArgs << "-c:v" << "copy"
                 << "-c:v:0" << "libx265"
                 << "-preset" << m_settings["preset"].toString()
                 << "-crf" << QString::number(m_settings["crf"].toInt())
-                << "-x265-params" << "profile=main10:no-sao=1:selective-sao=0:pmode=1:pme=1";
+                << "-x265-params" << x265Params;
 
         // Build video filters for encoding (specifically apply only to v:0)
         QStringList videoFilters;
