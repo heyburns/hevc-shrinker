@@ -14,6 +14,9 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QScrollArea>
+#include <QMenu>
+#include <QDesktopServices>
+#include <QUrl>
 
 // -------------------------------------------------------------
 // TranscodeMonitorCard Implementation
@@ -271,6 +274,8 @@ void MainWindow::initUi()
     });
     m_tableQueue->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tableQueue->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tableQueue->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tableQueue, &QTableWidget::customContextMenuRequested, this, &MainWindow::showTableContextMenu);
 
     // Configure headers to be interactive
     QHeaderView *header = m_tableQueue->horizontalHeader();
@@ -1062,5 +1067,26 @@ void MainWindow::onResetScoreboardClicked()
         } else {
             logMessage("[ERROR] Failed to clear transcode history.");
         }
+    }
+}
+
+void MainWindow::showTableContextMenu(const QPoint &pos)
+{
+    QTableWidgetItem *item = m_tableQueue->itemAt(pos);
+    if (!item) return;
+
+    int row = item->row();
+    QTableWidgetItem *pathItem = m_tableQueue->item(row, 5);
+    if (!pathItem) return;
+
+    QString relPath = pathItem->text();
+    QString absPath = QDir(m_rootDir).filePath(relPath);
+
+    QMenu menu(this);
+    QAction *playAction = menu.addAction("Play Video");
+
+    QAction *selected = menu.exec(m_tableQueue->viewport()->mapToGlobal(pos));
+    if (selected == playAction) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
     }
 }

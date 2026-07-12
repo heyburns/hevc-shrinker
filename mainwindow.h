@@ -82,6 +82,7 @@ private slots:
     void onWorkerPreviewFrameRequested(const QString &filepath, double secs);
     void togglePreview(bool checked);
     void onConcurrentChanged(int val);
+    void showTableContextMenu(const QPoint &pos);
 
 private:
     // UI elements
