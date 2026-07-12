@@ -356,6 +356,13 @@ void MainWindow::initUi()
     ctrlLayout->addWidget(m_chkPreview);
     connect(m_chkPreview, &QCheckBox::toggled, this, &MainWindow::togglePreview);
 
+    // Max Concurrent Encodes
+    ctrlLayout->addWidget(new QLabel("Max Concurrent Encodes:"));
+    m_spinConcurrent = new QSpinBox();
+    m_spinConcurrent->setRange(1, 16);
+    m_spinConcurrent->setValue(1);
+    ctrlLayout->addWidget(m_spinConcurrent);
+
     // Reset Buttons
     m_btnReset = new QPushButton("Restore settings back to defaults");
     connect(m_btnReset, &QPushButton::clicked, this, &MainWindow::resetSettings);
