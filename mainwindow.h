@@ -15,6 +15,7 @@
 #include <QVariantMap>
 #include <QStringList>
 #include <QProcess>
+#include <QHBoxLayout>
 #include "databasemanager.h"
 #include "transcodeworker.h"
 
@@ -24,6 +25,34 @@ struct ScannedFile {
     QString relPath;
     qint64 size = 0;
     qint64 lastModified = 0;
+};
+
+class TranscodeMonitorCard : public QGroupBox {
+    Q_OBJECT
+public:
+    TranscodeMonitorCard(const QString &filepath, QWidget *parent = nullptr);
+    ~TranscodeMonitorCard();
+
+    void updateProgress(int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb);
+    void updateStatus(const QString &status, const QString &details);
+    void requestFramePreview(double secs);
+
+private slots:
+    void onPreviewDataAvailable();
+    void onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+
+private:
+    QString m_filepath;
+    QLabel *m_lblFile;
+    QLabel *m_lblPerf;
+    QLabel *m_lblTime;
+    QLabel *m_lblSize;
+    QProgressBar *m_progressBar;
+    QLabel *m_lblPreview;
+
+    QProcess *m_previewProcess;
+    QByteArray m_previewBuffer;
+    qint64 m_startTime;
 };
 
 class MainWindow : public QMainWindow {
@@ -46,9 +75,10 @@ private slots:
     void updateStatus(const QString &filepath, const QString &status, const QString &details);
     void fileDone(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize);
     void processingFinished();
-    void onFramePreviewRequested(const QString &filepath, double secs);
-    void onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onPreviewDataAvailable();
+    
+    void startNextQueueJob();
+    void onWorkerFinished();
+    void onWorkerPreviewFrameRequested(const QString &filepath, double secs);
     void togglePreview(bool checked);
 
 private:
@@ -67,6 +97,7 @@ private:
     QCheckBox *m_chkDownscale;
     QCheckBox *m_chkDebob;
     QCheckBox *m_chkPreview;
+    QSpinBox *m_spinConcurrent;
 
     QLabel *m_lblFfmpegStatus;
     QLabel *m_lblFfprobeStatus;
@@ -78,25 +109,19 @@ private:
 
     QTableWidget *m_tableQueue;
 
-    // Collapsible Monitor Card widgets
-    QGroupBox *m_statusCard;
-    QLabel *m_lblStatusFile;
-    QLabel *m_lblStatusPerf;
-    QLabel *m_lblStatusTime;
-    QLabel *m_lblStatusSize;
-    QProgressBar *m_statusProgressBar;
-    QGroupBox *m_previewGroup;
-    QLabel *m_lblPreview;
-    QProcess *m_previewProcess;
-    QByteArray m_previewBuffer;
+    // Scrollable area for active transcode progress cards
+    QWidget *m_monitorsContainer;
+    QHBoxLayout *m_monitorsLayout;
 
     // Logic members
     QString m_rootDir;
     DatabaseManager *m_dbManager;
-    TranscodeWorker *m_worker;
+    QList<TranscodeWorker*> m_workers;
+    QHash<QString, TranscodeMonitorCard*> m_activeCards;
     QList<ScannedFile> m_scannedFiles;
     QStringList m_activeTranscodeQueue;
-    qint64 m_transcodeStartTime;
+    QStringList m_pendingQueue;
+    bool m_isQueueRunning;
 
     void initUi();
     void checkDependencies();

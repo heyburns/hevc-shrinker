@@ -13,13 +13,201 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
+#include <QScrollArea>
+
+// -------------------------------------------------------------
+// TranscodeMonitorCard Implementation
+// -------------------------------------------------------------
+TranscodeMonitorCard::TranscodeMonitorCard(const QString &filepath, QWidget *parent)
+    : QGroupBox("Active Transcode Monitor", parent)
+    , m_filepath(filepath)
+    , m_startTime(0)
+{
+    setStyleSheet(
+        "QGroupBox { font-weight: bold; border: 1px solid palette(mid); border-radius: 4px; margin-top: 6px; padding-top: 10px; background-color: palette(window); }"
+    );
+    setFixedWidth(460);
+    setFixedHeight(170);
+
+    QHBoxLayout *mainCardLayout = new QHBoxLayout(this);
+    mainCardLayout->setContentsMargins(8, 8, 8, 8);
+    mainCardLayout->setSpacing(8);
+
+    // Left Side: Square Preview
+    m_lblPreview = new QLabel("Preview Off");
+    m_lblPreview->setAlignment(Qt::AlignCenter);
+    m_lblPreview->setFixedSize(140, 140);
+    m_lblPreview->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
+    mainCardLayout->addWidget(m_lblPreview);
+
+    // Right Side: Info and Progress
+    QWidget *infoWidget = new QWidget();
+    QVBoxLayout *infoLayout = new QVBoxLayout(infoWidget);
+    infoLayout->setContentsMargins(0, 0, 0, 0);
+    infoLayout->setSpacing(4);
+
+    // Row 0: File Name
+    QHBoxLayout *row0 = new QHBoxLayout();
+    row0->addWidget(new QLabel("File:"));
+    m_lblFile = new QLabel(QFileInfo(filepath).fileName());
+    m_lblFile->setStyleSheet("font-weight: bold;");
+    row0->addWidget(m_lblFile, 1);
+    infoLayout->addLayout(row0);
+
+    // Row 1: Perf details
+    QHBoxLayout *row1 = new QHBoxLayout();
+    row1->addWidget(new QLabel("Speed/FPS:"));
+    m_lblPerf = new QLabel("N/A");
+    m_lblPerf->setStyleSheet("font-weight: bold;");
+    row1->addWidget(m_lblPerf, 1);
+    infoLayout->addLayout(row1);
+
+    // Row 2: Time details
+    QHBoxLayout *row2 = new QHBoxLayout();
+    row2->addWidget(new QLabel("Time:"));
+    m_lblTime = new QLabel("N/A");
+    m_lblTime->setStyleSheet("font-weight: bold;");
+    row2->addWidget(m_lblTime, 1);
+    infoLayout->addLayout(row2);
+
+    // Row 3: Progress Bar
+    m_progressBar = new QProgressBar();
+    m_progressBar->setRange(0, 100);
+    m_progressBar->setValue(0);
+    m_progressBar->setTextVisible(true);
+    m_progressBar->setAlignment(Qt::AlignCenter);
+    m_progressBar->setFixedHeight(18);
+    m_progressBar->setStyleSheet(
+        "QProgressBar { border: 1px solid palette(mid); border-radius: 3px; text-align: center; } QProgressBar::chunk { background-color: palette(highlight); }"
+    );
+    infoLayout->addWidget(m_progressBar);
+
+    // Row 4: Size details
+    QHBoxLayout *row4 = new QHBoxLayout();
+    row4->addWidget(new QLabel("Size:"));
+    m_lblSize = new QLabel("N/A");
+    m_lblSize->setStyleSheet("font-weight: bold;");
+    row4->addWidget(m_lblSize, 1);
+    infoLayout->addLayout(row4);
+
+    mainCardLayout->addWidget(infoWidget, 1);
+
+    // Initialize Preview Process
+    m_previewProcess = new QProcess(this);
+    connect(m_previewProcess, &QProcess::readyReadStandardOutput, this, &TranscodeMonitorCard::onPreviewDataAvailable);
+    connect(m_previewProcess, &QProcess::finished, this, &TranscodeMonitorCard::onPreviewProcessFinished);
+}
+
+TranscodeMonitorCard::~TranscodeMonitorCard()
+{
+    if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
+        m_previewProcess->kill();
+        m_previewProcess->waitForFinished();
+    }
+}
+
+void TranscodeMonitorCard::updateProgress(int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb)
+{
+    if (m_startTime == 0) {
+        m_startTime = QDateTime::currentSecsSinceEpoch();
+    }
+    qint64 elapsedSec = QDateTime::currentSecsSinceEpoch() - m_startTime;
+    QString elapsedStr = QString("%1:%2")
+                            .arg(elapsedSec / 60, 2, 10, QChar('0'))
+                            .arg(elapsedSec % 60, 2, 10, QChar('0'));
+
+    m_lblPerf->setText(QString("%1 FPS | %2x").arg(QString::number(fps, 'f', 0), QString::number(speed, 'f', 2)));
+    m_lblTime->setText(QString("Elapsed: %1 | Remaining: %2").arg(elapsedStr, etaStr));
+
+    if (percentage >= 3) {
+        m_lblSize->setText(
+            QString("%1 MB / ~%2 MB (Orig: %3 MB)")
+                .arg(QString::number(outSizeMb, 'f', 1),
+                     QString::number(projectedSizeMb, 'f', 1),
+                     QString::number(static_cast<double>(QFileInfo(m_filepath).size()) / (1024.0 * 1024.0), 'f', 1))
+        );
+    } else {
+        m_lblSize->setText(
+            QString("%1 MB / Calculating... (Orig: %2 MB)")
+                .arg(QString::number(outSizeMb, 'f', 1),
+                     QString::number(static_cast<double>(QFileInfo(m_filepath).size()) / (1024.0 * 1024.0), 'f', 1))
+        );
+    }
+
+    m_progressBar->setValue(percentage);
+}
+
+void TranscodeMonitorCard::updateStatus(const QString &status, const QString &details)
+{
+    Q_UNUSED(details);
+    if (status == "Processing") {
+        m_startTime = QDateTime::currentSecsSinceEpoch();
+        m_lblPerf->setText("N/A");
+        m_lblTime->setText("N/A");
+        m_lblSize->setText("N/A");
+        m_progressBar->setValue(0);
+        m_lblPreview->clear();
+        m_lblPreview->setText("Preview Off");
+    }
+}
+
+void TranscodeMonitorCard::requestFramePreview(double secs)
+{
+    if (m_previewProcess->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    QString ffmpeg = findDependency("ffmpeg");
+    if (ffmpeg.isEmpty()) return;
+
+    m_previewBuffer.clear();
+
+    int h = static_cast<int>(secs / 3600);
+    int m = static_cast<int>((secs - h * 3600) / 60);
+    int s = static_cast<int>(secs - h * 3600 - m * 60);
+    int ms = static_cast<int>((secs - h * 3600 - m * 60 - s) * 1000);
+    QString timeStr = QString("%1:%2:%3.%4")
+                      .arg(h, 2, 10, QChar('0'))
+                      .arg(m, 2, 10, QChar('0'))
+                      .arg(s, 2, 10, QChar('0'))
+                      .arg(ms, 3, 10, QChar('0'));
+
+    m_previewProcess->start(ffmpeg, {
+        "-y",
+        "-ss", timeStr,
+        "-i", m_filepath,
+        "-vf", "scale=140:-1",
+        "-frames:v", "1",
+        "-f", "image2pipe",
+        "-vcodec", "png",
+        "-"
+    });
+}
+
+void TranscodeMonitorCard::onPreviewDataAvailable()
+{
+    m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
+}
+
+void TranscodeMonitorCard::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
+        if (!m_previewBuffer.isEmpty()) {
+            QPixmap pixmap;
+            if (pixmap.loadFromData(m_previewBuffer, "PNG")) {
+                QPixmap scaledPixmap = pixmap.scaled(m_lblPreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                m_lblPreview->setPixmap(scaledPixmap);
+            }
+        }
+    }
+    m_previewBuffer.clear();
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_dbManager(nullptr)
-    , m_worker(nullptr)
-    , m_previewProcess(nullptr)
-    , m_transcodeStartTime(0)
+    , m_isQueueRunning(false)
 {
     initUi();
     checkDependencies();
@@ -33,15 +221,11 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
-    if (m_worker) {
-        m_worker->stop();
-        m_worker->wait();
+    for (TranscodeWorker *worker : m_workers) {
+        worker->stop();
+        worker->wait();
     }
-    if (m_previewProcess) {
-        m_previewProcess->kill();
-        m_previewProcess->waitForFinished();
-        delete m_previewProcess;
-    }
+    m_workers.clear();
     delete m_dbManager;
 }
 
@@ -96,66 +280,21 @@ void MainWindow::initUi()
     bottomLayout->setContentsMargins(0, 0, 0, 0);
     bottomLayout->setSpacing(10);
 
-    // Center Column: Live Progress Preview
-    m_previewGroup = new QGroupBox("Live Progress Preview");
-    QVBoxLayout *previewLayout = new QVBoxLayout(m_previewGroup);
-    previewLayout->setContentsMargins(5, 10, 5, 5);
-    m_lblPreview = new QLabel("Preview Off");
-    m_lblPreview->setAlignment(Qt::AlignCenter);
-    m_lblPreview->setFixedSize(240, 240);
-    m_lblPreview->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
-    previewLayout->addWidget(m_lblPreview);
-    bottomLayout->addWidget(m_previewGroup, 0); // Keep fixed width
-    m_previewGroup->setVisible(false); // Hidden initially
+    // Active Transcode Monitors Area (Scrollable horizontal container)
+    QScrollArea *scrollArea = new QScrollArea();
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
-    // Right Column: Active Transcode Monitor Card
-    m_statusCard = new QGroupBox("Active Transcode Monitor");
-    m_statusCard->setStyleSheet(
-        "QGroupBox { font-weight: bold; border: 1px solid palette(mid); border-radius: 4px; margin-top: 6px; padding-top: 10px; background-color: palette(window); }"
-    );
-    QGridLayout *cardLayout = new QGridLayout(m_statusCard);
-    cardLayout->setContentsMargins(10, 10, 10, 10);
-    cardLayout->setSpacing(6);
+    m_monitorsContainer = new QWidget();
+    m_monitorsLayout = new QHBoxLayout(m_monitorsContainer);
+    m_monitorsLayout->setContentsMargins(0, 0, 0, 0);
+    m_monitorsLayout->setSpacing(10);
+    m_monitorsLayout->addStretch(); // Push cards to the left initially
 
-    // Row 0: File Name
-    cardLayout->addWidget(new QLabel("Current File:"), 0, 0);
-    m_lblStatusFile = new QLabel("None");
-    m_lblStatusFile->setStyleSheet("font-weight: bold;");
-    cardLayout->addWidget(m_lblStatusFile, 0, 1, 1, 3);
-
-    // Row 1: Perf & Time details
-    cardLayout->addWidget(new QLabel("Speed/FPS:"), 1, 0);
-    m_lblStatusPerf = new QLabel("N/A");
-    m_lblStatusPerf->setStyleSheet("font-weight: bold;");
-    cardLayout->addWidget(m_lblStatusPerf, 1, 1);
-
-    QLabel *lblTime = new QLabel("Time:");
-    lblTime->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    cardLayout->addWidget(lblTime, 1, 2);
-    m_lblStatusTime = new QLabel("N/A");
-    m_lblStatusTime->setStyleSheet("font-weight: bold;");
-    cardLayout->addWidget(m_lblStatusTime, 1, 3);
-
-    // Row 2: Progress
-    cardLayout->addWidget(new QLabel("Progress:"), 2, 0);
-    m_statusProgressBar = new QProgressBar();
-    m_statusProgressBar->setRange(0, 100);
-    m_statusProgressBar->setValue(0);
-    m_statusProgressBar->setTextVisible(true);
-    m_statusProgressBar->setAlignment(Qt::AlignCenter);
-    m_statusProgressBar->setStyleSheet(
-        "QProgressBar { border: 1px solid palette(mid); border-radius: 3px; text-align: center; } QProgressBar::chunk { background-color: palette(highlight); }"
-    );
-    cardLayout->addWidget(m_statusProgressBar, 2, 1, 1, 3);
-
-    // Row 3: Size details
-    cardLayout->addWidget(new QLabel("Size Stats:"), 3, 0);
-    m_lblStatusSize = new QLabel("N/A");
-    m_lblStatusSize->setStyleSheet("font-weight: bold;");
-    cardLayout->addWidget(m_lblStatusSize, 3, 1, 1, 3);
-
-    bottomLayout->addWidget(m_statusCard, 2); // Stretch factor 2
-    m_statusCard->setVisible(false); // Collapsed initially
+    scrollArea->setWidget(m_monitorsContainer);
+    bottomLayout->addWidget(scrollArea, 1);
 
     rightSplitter->addWidget(bottomDashboard);
     rightSplitter->setSizes({420, 200});
@@ -556,8 +695,33 @@ void MainWindow::startProcessing()
     m_btnScan->setEnabled(false);
     m_btnStart->setEnabled(false);
     m_btnStop->setEnabled(true);
+    m_isQueueRunning = true;
 
-    logMessage("Starting transcode queue...");
+    m_pendingQueue = m_activeTranscodeQueue;
+
+    logMessage(QString("Starting transcode queue with %1 files...").arg(m_pendingQueue.count()));
+
+    // Remove any initial layout stretches
+    if (m_monitorsLayout->count() > 0) {
+        QLayoutItem *item = m_monitorsLayout->takeAt(0);
+        if (item) {
+            delete item;
+        }
+    }
+
+    // Spawn up to maxConcurrent workers
+    int maxConcurrent = m_spinConcurrent->value();
+    for (int i = 0; i < maxConcurrent; ++i) {
+        startNextQueueJob();
+    }
+}
+
+void MainWindow::startNextQueueJob()
+{
+    if (!m_isQueueRunning || m_pendingQueue.isEmpty()) return;
+
+    QString filepath = m_pendingQueue.takeFirst();
+    logMessage(QString("Dispatching transcode job: %1").arg(QFileInfo(filepath).fileName()));
 
     QVariantMap settings;
     settings["crf"] = m_spinCrf->value();
@@ -567,38 +731,99 @@ void MainWindow::startProcessing()
     settings["live_preview"] = m_chkPreview->isChecked();
 
     QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
-    m_worker = new TranscodeWorker(m_activeTranscodeQueue, m_rootDir, dbPath, settings, this);
-    
-    // Connect Worker Thread signals
-    connect(m_worker, &TranscodeWorker::logSignal, this, &MainWindow::logMessage);
-    connect(m_worker, &TranscodeWorker::progressSignal, this, &MainWindow::updateProgress);
-    connect(m_worker, &TranscodeWorker::statusSignal, this, &MainWindow::updateStatus);
-    connect(m_worker, &TranscodeWorker::fileDoneSignal, this, &MainWindow::fileDone);
-    connect(m_worker, &TranscodeWorker::finishedSignal, this, &MainWindow::processingFinished);
-    connect(m_worker, &TranscodeWorker::previewFrameSignal, this, &MainWindow::onFramePreviewRequested);
-    
-    // Wire cleanup
-    connect(m_worker, &TranscodeWorker::finished, m_worker, &TranscodeWorker::deleteLater);
+    TranscodeWorker *worker = new TranscodeWorker(QStringList{filepath}, m_rootDir, dbPath, settings, this);
+    worker->setProperty("filepath", filepath);
 
-    m_worker->start();
+    // Remove last stretch spacer if it exists
+    if (m_monitorsLayout->count() > 0) {
+        QLayoutItem *lastItem = m_monitorsLayout->itemAt(m_monitorsLayout->count() - 1);
+        if (lastItem && lastItem->spacerItem()) {
+            m_monitorsLayout->removeItem(lastItem);
+            delete lastItem;
+        }
+    }
+
+    // Add progress monitor card
+    TranscodeMonitorCard *card = new TranscodeMonitorCard(filepath, m_monitorsContainer);
+    m_monitorsLayout->addWidget(card);
+    m_activeCards.insert(filepath, card);
+
+    // Add stretch back at the end
+    m_monitorsLayout->addStretch();
+
+    // Connect Worker Thread signals
+    connect(worker, &TranscodeWorker::logSignal, this, &MainWindow::logMessage);
+    connect(worker, &TranscodeWorker::progressSignal, this, &MainWindow::updateProgress);
+    connect(worker, &TranscodeWorker::statusSignal, this, &MainWindow::updateStatus);
+    connect(worker, &TranscodeWorker::fileDoneSignal, this, &MainWindow::fileDone);
+    connect(worker, &TranscodeWorker::finishedSignal, this, &MainWindow::onWorkerFinished);
+    connect(worker, &TranscodeWorker::previewFrameSignal, this, &MainWindow::onWorkerPreviewFrameRequested);
+
+    m_workers.append(worker);
+    worker->start();
+}
+
+void MainWindow::onWorkerFinished()
+{
+    TranscodeWorker *worker = qobject_cast<TranscodeWorker*>(sender());
+    if (!worker) return;
+
+    m_workers.removeOne(worker);
+    worker->deleteLater();
+
+    QString filepath = worker->property("filepath").toString();
+    if (m_activeCards.contains(filepath)) {
+        TranscodeMonitorCard *card = m_activeCards.take(filepath);
+        m_monitorsLayout->removeWidget(card);
+        delete card;
+    }
+
+    if (m_isQueueRunning && !m_pendingQueue.isEmpty()) {
+        startNextQueueJob();
+    } else if (m_pendingQueue.isEmpty() && m_workers.isEmpty()) {
+        processingFinished();
+    }
+}
+
+void MainWindow::onWorkerPreviewFrameRequested(const QString &filepath, double secs)
+{
+    if (m_activeCards.contains(filepath)) {
+        m_activeCards[filepath]->requestFramePreview(secs);
+    }
 }
 
 void MainWindow::stopProcessing()
 {
-    if (m_worker && m_worker->isRunning()) {
-        logMessage("[ABORT] Stopping processing and cleaning up...");
-        m_btnStop->setEnabled(false);
-        m_statusCard->setVisible(false);
-        m_previewGroup->setVisible(false);
-        m_lblPreview->clear();
-        m_lblPreview->setText("Preview Off");
+    logMessage("[ABORT] Stopping all active transcode tasks...");
+    m_btnStop->setEnabled(false);
+    m_isQueueRunning = false;
+    m_pendingQueue.clear();
 
-        if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-            m_previewProcess->kill();
-        }
-
-        m_worker->stop();
+    // Tell all workers to stop
+    for (TranscodeWorker *worker : m_workers) {
+        worker->stop();
     }
+
+    // Wait for all workers to finish
+    for (TranscodeWorker *worker : m_workers) {
+        worker->wait();
+        worker->deleteLater();
+    }
+    m_workers.clear();
+
+    // Remove all progress cards
+    QList<QString> keys = m_activeCards.keys();
+    for (const QString &key : keys) {
+        TranscodeMonitorCard *card = m_activeCards.take(key);
+        m_monitorsLayout->removeWidget(card);
+        delete card;
+    }
+    m_activeCards.clear();
+
+    // Add back the layout stretch spacer
+    m_monitorsLayout->addStretch();
+
+    processingFinished();
 }
 
 void MainWindow::resetSettings()
@@ -623,36 +848,11 @@ void MainWindow::updateProgress(const QString &filepath, int percentage, double 
         // Table cell updates
         QString statsStr = (etaStr != "N/A") ? QString(" (%1x | ETA %2)").arg(QString::number(speed, 'f', 1), etaStr) : "";
         m_tableQueue->setItem(idx, 4, new QTableWidgetItem(QString("%1%%2").arg(QString::number(percentage), statsStr)));
+    }
 
-        // Monitor card updates
-        if (m_transcodeStartTime == 0) {
-            m_transcodeStartTime = QDateTime::currentSecsSinceEpoch();
-        }
-        qint64 elapsedSec = QDateTime::currentSecsSinceEpoch() - m_transcodeStartTime;
-        QString elapsedStr = QString("%1:%2")
-                                .arg(elapsedSec / 60, 2, 10, QChar('0'))
-                                .arg(elapsedSec % 60, 2, 10, QChar('0'));
-
-        m_lblStatusFile->setText(QFileInfo(filepath).fileName());
-        m_lblStatusPerf->setText(QString("%1 FPS | %2x").arg(QString::number(fps, 'f', 0), QString::number(speed, 'f', 2)));
-        m_lblStatusTime->setText(QString("Elapsed: %1 | Remaining: %2").arg(elapsedStr, etaStr));
-
-        if (percentage >= 3) {
-            m_lblStatusSize->setText(
-                QString("Current: %1 MB | Projected: ~%2 MB (Original: %3 MB)")
-                    .arg(QString::number(outSizeMb, 'f', 1),
-                         QString::number(projectedSizeMb, 'f', 1),
-                         QString::number(static_cast<double>(QFileInfo(filepath).size()) / (1024.0 * 1024.0), 'f', 1))
-            );
-        } else {
-            m_lblStatusSize->setText(
-                QString("Current: %1 MB | Projected: Calculating... (Original: %2 MB)")
-                    .arg(QString::number(outSizeMb, 'f', 1),
-                         QString::number(static_cast<double>(QFileInfo(filepath).size()) / (1024.0 * 1024.0), 'f', 1))
-            );
-        }
-
-        m_statusProgressBar->setValue(percentage);
+    // Route to card
+    if (m_activeCards.contains(filepath)) {
+        m_activeCards[filepath]->updateProgress(percentage, fps, speed, etaStr, outSizeMb, projectedSizeMb);
     }
 }
 
@@ -664,18 +864,6 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
         m_tableQueue->setItem(idx, 4, new QTableWidgetItem(details));
 
         if (status == "Processing") {
-            m_transcodeStartTime = QDateTime::currentSecsSinceEpoch();
-
-            m_lblStatusFile->setText(QFileInfo(filepath).fileName());
-            m_lblStatusPerf->setText("N/A");
-            m_lblStatusTime->setText("N/A");
-            m_lblStatusSize->setText("N/A");
-            m_statusProgressBar->setValue(0);
-            m_statusCard->setVisible(true);
-            m_previewGroup->setVisible(m_chkPreview->isChecked());
-            m_lblPreview->clear();
-            m_lblPreview->setText("Preview Off");
-
             for (int col = 0; col < 6; ++col) {
                 QTableWidgetItem *item = m_tableQueue->item(idx, col);
                 if (item) {
@@ -685,15 +873,17 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
             }
         }
     }
+
+    // Route to card
+    if (m_activeCards.contains(filepath)) {
+        m_activeCards[filepath]->updateStatus(status, details);
+    }
 }
 
 void MainWindow::fileDone(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize)
 {
     int idx = findRowByFilepath(filepath);
     if (idx != -1) {
-        m_previewGroup->setVisible(false);
-        m_lblPreview->clear();
-        m_lblPreview->setText("Preview Off");
         m_tableQueue->setItem(idx, 1, new QTableWidgetItem(status));
         m_tableQueue->setItem(idx, 4, new QTableWidgetItem("Finished"));
         
@@ -725,13 +915,12 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
 
 void MainWindow::processingFinished()
 {
-    logMessage("\nAll queue tasks finished.");
+    logMessage("\nAll transcode queue tasks finished.");
     m_btnBrowse->setEnabled(true);
     m_btnScan->setEnabled(true);
     updateStartButtonState();
     m_btnStop->setEnabled(false);
-    m_statusCard->setVisible(false);
-    m_worker = nullptr;
+    m_isQueueRunning = false;
 }
 
 void MainWindow::updateStartButtonState()
@@ -778,93 +967,10 @@ int MainWindow::findRowByFilepath(const QString &filepath)
     return -1;
 }
 
-void MainWindow::onFramePreviewRequested(const QString &filepath, double secs)
-{
-    // If the preview setting is disabled or m_previewGroup is hidden, do nothing
-    if (!m_chkPreview->isChecked()) return;
-
-    // Check if the preview process is already running to avoid piling up
-    if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-        return;
-    }
-
-    QString ffmpeg = findDependency("ffmpeg");
-    if (ffmpeg.isEmpty()) return;
-
-    if (!m_previewProcess) {
-        m_previewProcess = new QProcess(this);
-        connect(m_previewProcess, &QProcess::readyReadStandardOutput, this, &MainWindow::onPreviewDataAvailable);
-        connect(m_previewProcess, &QProcess::finished, this, &MainWindow::onPreviewProcessFinished);
-    }
-
-    // Clear old PNG byte buffer
-    m_previewBuffer.clear();
-
-    // Format the time as hh:mm:ss.zzz (ensure seconds have two digits padded to prevent FFmpeg parsing failure)
-    int h = static_cast<int>(secs / 3600);
-    int m = static_cast<int>((secs - h * 3600) / 60);
-    int s = static_cast<int>(secs - h * 3600 - m * 60);
-    int ms = static_cast<int>((secs - h * 3600 - m * 60 - s) * 1000);
-    QString timeStr = QString("%1:%2:%3.%4")
-                      .arg(h, 2, 10, QChar('0'))
-                      .arg(m, 2, 10, QChar('0'))
-                      .arg(s, 2, 10, QChar('0'))
-                      .arg(ms, 3, 10, QChar('0'));
-
-    // Run high-speed input seeking and pipe directly to stdout as PNG (buffered asynchronously)
-    m_previewProcess->start(ffmpeg, {
-        "-y",
-        "-ss", timeStr,
-        "-i", filepath,
-        "-vf", "scale=240:-1",
-        "-frames:v", "1",
-        "-f", "image2pipe",
-        "-vcodec", "png",
-        "-"
-    });
-}
-
-void MainWindow::onPreviewDataAvailable()
-{
-    if (m_previewProcess) {
-        m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
-    }
-}
-
-void MainWindow::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
-{
-    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-        // Read any remaining final buffer bytes
-        if (m_previewProcess) {
-            m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
-        }
-
-        if (!m_previewBuffer.isEmpty()) {
-            QPixmap pixmap;
-            if (pixmap.loadFromData(m_previewBuffer, "PNG")) {
-                QPixmap scaledPixmap = pixmap.scaled(m_lblPreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                m_lblPreview->setPixmap(scaledPixmap);
-            }
-        }
-    }
-    m_previewBuffer.clear();
-}
-
 void MainWindow::togglePreview(bool checked)
 {
-    if (m_worker && m_worker->isRunning()) {
-        m_worker->setLivePreviewEnabled(checked);
-        m_previewGroup->setVisible(checked);
-        if (!checked) {
-            m_lblPreview->clear();
-            m_lblPreview->setText("Preview Off");
-            if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-                m_previewProcess->kill();
-            }
-            m_previewBuffer.clear();
-        }
-    } else {
-        m_previewGroup->setVisible(false);
+    for (TranscodeWorker *worker : m_workers) {
+        worker->setLivePreviewEnabled(checked);
     }
 }
 
