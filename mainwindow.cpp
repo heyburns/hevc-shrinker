@@ -204,6 +204,21 @@ void TranscodeMonitorCard::onPreviewProcessFinished(int exitCode, QProcess::Exit
     m_previewBuffer.clear();
 }
 
+void TranscodeMonitorCard::setPreviewVisible(bool visible)
+{
+    m_lblPreview->setVisible(visible);
+    setFixedWidth(visible ? 460 : 310);
+    if (!visible) {
+        m_lblPreview->clear();
+        m_lblPreview->setText("Preview Off");
+        if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
+            m_previewProcess->kill();
+            m_previewProcess->waitForFinished();
+        }
+        m_previewBuffer.clear();
+    }
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_dbManager(nullptr)
@@ -752,6 +767,7 @@ void MainWindow::startNextQueueJob()
 
     // Add progress monitor card
     TranscodeMonitorCard *card = new TranscodeMonitorCard(filepath, m_monitorsContainer);
+    card->setPreviewVisible(m_chkPreview->isChecked());
     m_monitorsLayout->addWidget(card);
     m_activeCards.insert(filepath, card);
 
@@ -978,6 +994,9 @@ void MainWindow::togglePreview(bool checked)
 {
     for (TranscodeWorker *worker : m_workers) {
         worker->setLivePreviewEnabled(checked);
+    }
+    for (TranscodeMonitorCard *card : m_activeCards.values()) {
+        card->setPreviewVisible(checked);
     }
 }
 

@@ -36,6 +36,7 @@ public:
     void updateProgress(int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb);
     void updateStatus(const QString &status, const QString &details);
     void requestFramePreview(double secs);
+    void setPreviewVisible(bool visible);
 
 private slots:
     void onPreviewDataAvailable();
