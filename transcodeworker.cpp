@@ -13,7 +13,9 @@
 #include <QDateTime>
 #include <QDebug>
 
-// Helper: safe cross-volume file move
+// Helper function to safely move files across different disk volumes or filesystems.
+// Under Linux, rename() fails if target is on a different mount point (e.g. SSD to HDD share).
+// This function falls back to copy-then-delete if standard rename fails.
 static bool safeMove(const QString &src, const QString &dest) {
     if (QFile::rename(src, dest)) return true;
     if (QFile::copy(src, dest)) {
@@ -22,32 +24,40 @@ static bool safeMove(const QString &src, const QString &dest) {
     return false;
 }
 
+// Searches for executable dependencies (like ffmpeg/ffprobe) on the host system.
+// Checks the system PATH first, then falls back to check the directory where this application runs.
 QString findDependency(const QString &name) {
     QString path = QStandardPaths::findExecutable(name);
     if (!path.isEmpty()) return path;
 
     QString localPath = QCoreApplication::applicationDirPath() + "/" + name;
 #ifdef Q_OS_WIN
-    localPath += ".exe";
+    localPath += ".exe"; // Append suffix on Windows
 #endif
     if (QFile::exists(localPath)) return localPath;
-    return "";
+    return ""; // Not found
 }
 
+// Generates a quick cryptographic hash from the first 4MB of the video file.
+// Used as a unique signature to record and verify sizing history in the database.
 QString computeFastHash(const QString &filepath) {
     QFile file(filepath);
     if (!file.open(QIODevice::ReadOnly)) return "";
     QCryptographicHash hash(QCryptographicHash::Sha1);
-    QByteArray chunk = file.read(4 * 1024 * 1024); // 4MB
+    QByteArray chunk = file.read(4 * 1024 * 1024); // Read first 4MB
     hash.addData(chunk);
     return QString(hash.result().toHex());
 }
 
+// Probes a video file using FFprobe to check if it is already compliant (HEVC/H.265 video + AAC audio).
+// Non-compliant files require transcoding.
 bool probeFileCompliance(const QString &filepath, const QString &ffprobeBin) {
     QFileInfo fi(filepath);
+    // Standard library format mandates Matroska (.mkv) container
     if (fi.suffix().toLower() != "mkv") return false;
 
     QProcess proc;
+    // Launch FFprobe requesting json output representing codecs
     proc.start(ffprobeBin, {
         "-v", "error",
         "-show_entries", "stream=codec_name",
@@ -62,27 +72,31 @@ bool probeFileCompliance(const QString &filepath, const QString &ffprobeBin) {
             QJsonArray streams = obj["streams"].toArray();
             bool hasHevc = false;
             bool hasAac = false;
+            // Iterate through audio/video streams to inspect their codecs
             for (const QJsonValue &val : streams) {
                 QString codec = val.toObject()["codec_name"].toString().toLower();
                 if (codec == "hevc") hasHevc = true;
                 if (codec == "aac") hasAac = true;
             }
+            // Fully compliant if container is .mkv and contains both HEVC and AAC streams
             return (hasHevc && hasAac);
         }
     }
     return false;
 }
 
+// Checks if the host's FFmpeg binary has the high-quality Fraunhofer AAC encoder (libfdk_aac) compiled in.
 static bool detectFdkAac(const QString &ffmpegBin) {
     QProcess proc;
     proc.start(ffmpegBin, {"-encoders"});
     if (proc.waitForFinished()) {
         QString out = QString::fromUtf8(proc.readAllStandardOutput());
-        return out.contains("libfdk_aac");
+        return out.contains("libfdk_aac"); // True if fdk is present
     }
     return false;
 }
 
+// Parses JSON information returned by FFprobe to extract duration, codecs, sizes, and frames.
 VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) {
     VideoMetadata meta;
     QProcess proc;
@@ -112,6 +126,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
                     meta.fieldOrder = s["field_order"].toString().toLower();
                     meta.displayAspectRatio = s["display_aspect_ratio"].toString();
                     
+                    // Framerates are returned as fractions (e.g. "30000/1001"). Parse them.
                     QString fpsStr = s["avg_frame_rate"].toString();
                     if (fpsStr.contains("/")) {
                         QStringList parts = fpsStr.split("/");
@@ -124,6 +139,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
                         }
                     }
                 } else if (type == "audio") {
+                    // Extract the first audio stream codec
                     if (!meta.hasAudio) {
                         meta.acodec = s["codec_name"].toString().toLower();
                         meta.hasAudio = true;
@@ -135,26 +151,32 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
     return meta;
 }
 
+// Analytically evaluates if a video contains interlaced frames.
+// Runs FFmpeg's 'idet' filter for 360 frames (about 12–15 seconds) to determine if
+// interlacing characteristics exist.
 static bool probeInterlaced(const QString &filepath, const QString &ffmpegBin) {
     QProcess proc;
     proc.start(ffmpegBin, {
         "-filter_threads", "4",
         "-i", filepath,
-        "-filter:v", "idet",
-        "-frames:v", "360",
-        "-an",
-        "-f", "null",
+        "-filter:v", "idet", // Interlace detection filter
+        "-frames:v", "360", // Probe first 360 frames
+        "-an", // No audio decoding
+        "-f", "null", // Null muxer (discard output)
         "-"
     });
     if (proc.waitForFinished()) {
         QString err = QString::fromUtf8(proc.readAllStandardError());
+        // Parse the Multi-frame detection summary line
         QRegularExpression re("Multi frame detection:\\s*TFF:\\s*(\\d+)\\s*BFF:\\s*(\\d+)\\s*Progressive:\\s*(\\d+)");
         QRegularExpressionMatch match = re.match(err);
         if (match.hasMatch()) {
-            int tff = match.captured(1).toInt();
-            int bff = match.captured(2).toInt();
-            int prog = match.captured(3).toInt();
+            int tff = match.captured(1).toInt(); // Top Field First frames
+            int bff = match.captured(2).toInt(); // Bottom Field First frames
+            int prog = match.captured(3).toInt(); // Progressive frames
             int interlaced = tff + bff;
+            // Heuristic: If interlaced frames are more than double the progressive frames,
+            // the video is classified as interlaced.
             if (interlaced > prog * 2) {
                 return true;
             }
@@ -163,6 +185,7 @@ static bool probeInterlaced(const QString &filepath, const QString &ffmpegBin) {
     return false;
 }
 
+// Constructor: Initializes members and thread control variables.
 TranscodeWorker::TranscodeWorker(const QStringList &fileQueue, const QString &rootDir, const QString &dbPath, const QVariantMap &settings, QObject *parent)
     : QThread(parent)
     , m_fileQueue(fileQueue)
@@ -177,42 +200,49 @@ TranscodeWorker::TranscodeWorker(const QStringList &fileQueue, const QString &ro
     m_livePreviewEnabled = settings.value("live_preview", false).toBool();
 }
 
+// Destructor: Safely stops execution and cleans up process handles.
 TranscodeWorker::~TranscodeWorker()
 {
     stop();
 }
 
+// Thread-safe request to stop processing files in the queue.
 void TranscodeWorker::stop()
 {
     m_isRunning = false;
 }
 
+// Dynamic control of live progress preview generation.
 void TranscodeWorker::setLivePreviewEnabled(bool enabled)
 {
     m_livePreviewEnabled = enabled;
 }
 
+// Core execution method running inside the background thread.
 void TranscodeWorker::run()
 {
     m_isRunning = true;
     QString ffmpegBin = findDependency("ffmpeg");
     QString ffprobeBin = findDependency("ffprobe");
 
+    // Abort if dependencies are not found on the host system
     if (ffmpegBin.isEmpty() || ffprobeBin.isEmpty()) {
         emit logSignal("[ERROR] ffmpeg or ffprobe dependency is missing. Cannot process.");
         emit finishedSignal();
         return;
     }
 
+    // Set up trash and error directories inside the active workspace
     QString trashDir = QDir(m_rootDir).filePath(".Trash");
     QString errorDir = QDir(m_rootDir).filePath(".Errors");
 
-    // Detect FDK-AAC support
+    // Detect if Fraunhofer AAC is supported by this FFmpeg binary
     m_hasFdk = detectFdkAac(ffmpegBin);
     emit logSignal(QString("[NOTICE] Audio encoder: %1").arg(m_hasFdk ? "libfdk_aac (preferred)" : "aac (native fallback)"));
 
+    // Loop through files in the queue
     for (const QString &filepath : m_fileQueue) {
-        if (!m_isRunning) break;
+        if (!m_isRunning) break; // User requested abort
 
         try {
             processFile(filepath, ffmpegBin, ffprobeBin, trashDir, errorDir);
@@ -223,9 +253,10 @@ void TranscodeWorker::run()
         }
     }
 
-    emit finishedSignal();
+    emit finishedSignal(); // Signal parent thread that worker is done
 }
 
+// Main execution method that controls the transcode pipeline for a single file.
 bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpegBin, const QString &ffprobeBin, const QString &trashDir, const QString &errorDir)
 {
     QFileInfo fileInfo(filepath);
@@ -236,7 +267,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     emit logSignal(QString("\n[START] Processing file: %1").arg(baseName));
     emit statusSignal(filepath, "Processing", "Preparing...");
 
-    // Compute Fast Hash
+    // 1. Calculate the file signature (Fast Hash) to detect if we processed it before
     QString fileHash = computeFastHash(filepath);
     if (fileHash.isEmpty()) {
         emit logSignal("[ERROR] Failed to compute file hash. Skipping.");
@@ -244,7 +275,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         return false;
     }
 
-    // Probe file metadata using unified JSON ffprobe check
+    // 2. Query file properties (codecs, frame dimensions, durations) using FFprobe
     VideoMetadata meta = probeMetadata(filepath, ffprobeBin);
     if (meta.duration <= 0.0) {
         emit logSignal("[ERROR] Failed to read video metadata. Skipping.");
@@ -259,11 +290,11 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                         meta.hasAudio ? meta.acodec : "none",
                         QString::number(meta.duration, 'f', 1)));
 
-    // Auto Deinterlace analysis (scan data governs decision)
+    // 3. Scan the video for interlaced line characteristics using FFmpeg's 'idet' filter
     bool isInterlaced = probeInterlaced(filepath, ffmpegBin);
     emit logSignal(QString("Scan results: %1").arg(isInterlaced ? "Interlaced frames detected" : "Progressive scan detected"));
 
-    // Compare scan results with container metadata field_order
+    // Compare scan results with container metadata. If they disagree, log a warning and trust our scan analysis.
     bool metadataInterlaced = (meta.fieldOrder == "tt" || meta.fieldOrder == "bb" || meta.fieldOrder == "tb" || meta.fieldOrder == "bt");
     if (metadataInterlaced == isInterlaced) {
         emit logSignal(QString("Interlace check: Metadata and scan analysis agree (Interlaced: %1).")
@@ -276,11 +307,16 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
     }
 
-    // Determine target parameters
+    // 4. Decide target transcode rules based on compliance logic
     bool isAlreadyHevc = (meta.vcodec == "hevc");
     bool isAlreadyAac = (meta.acodec == "aac" || !meta.hasAudio);
+    
+    // If interlaced, a de-bobbing deinterlacer doubles the frame rate
     double effectiveFps = isInterlaced ? (meta.fps * 2.0) : meta.fps;
+    // We only downsample frame rates (bobbed) if they exceed 50 FPS and the user has enabled it
     bool bobbed = (effectiveFps >= 50.0 && m_settings["debob"].toBool());
+    
+    // Check if the video dimensions exceed 1080p (1920x1080) and need downscaling
     bool isPortrait = (meta.height > meta.width);
     bool needsDownscale = false;
     if (m_settings["downscale"].toBool()) {
@@ -291,47 +327,54 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
     }
 
+    // Check if file is in an obsolete format (e.g. WMV, AVI) which should be fully re-encoded to prevent container stream copy bugs.
     QString suffix = fileInfo.suffix().toLower();
     bool isObsoleteFormat = (suffix == "wmv" || suffix == "flv" || suffix == "avi" || suffix == "asf" || suffix == "f4v" || suffix == "divx");
 
+    // Codec target decisions (copy streams if they are already compliant, transcode otherwise)
     QString wantVideoCodec = (isAlreadyHevc && !needsDownscale && !bobbed && !isInterlaced && !isObsoleteFormat) ? "copy" : "libx265";
     QString wantAudioCodec = (isAlreadyAac && !isObsoleteFormat) ? "copy" : "encode";
 
-    // Prepare transcode commands
+    // Create absolute filepath path for the temporary transcoding output file
     QString tmpOut = QDir(fileDir).filePath(baseNoExt + ".tmp_out.mkv");
     
-    // Build arguments
+    // 5. Build the command line arguments for the FFmpeg process execution
     QStringList cmdArgs;
-    int threads = m_settings.value("threads", 0).toInt();
+    int threads = m_settings.value("threads", 0).toInt(); // Fetch thread limits calculated in main window
     if (threads > 0) {
+        // Enforce dynamic CPU thread partitions to prevent thread over-provisioning and cache thrashing
         cmdArgs << "-y" << "-threads" << QString::number(threads) << "-filter_threads" << QString::number(qMax(1, threads / 2)) << "-i" << filepath;
     } else {
         cmdArgs << "-y" << "-filter_threads" << "4" << "-i" << filepath;
     }
 
-    // Video compression and filter setup
+    // Set up Video arguments
     if (wantVideoCodec == "copy") {
-        cmdArgs << "-c:v" << "copy";
+        cmdArgs << "-c:v" << "copy"; // Stream copy video (instantaneous, no quality loss)
     } else {
+        // Build x265 parameters: enforce Main 10 profile (10-bit H.265), disable Sample Adaptive Offset (SAO) for detail retention,
+        // and set thread pools to match our partitioned thread count.
         QString x265Params = "profile=main10:no-sao=1:selective-sao=0:pmode=1:pme=1";
         if (threads > 0) {
             x265Params += QString(":pools=%1").arg(threads);
         }
 
-        // Set the default video codec for all video streams to copy (protects cover art pictures)
-        // and override the first video stream (v:0) to transcode to libx265.
+        // We copy video by default for extra streams (e.g., cover art attachments) but transcode
+        // the main video stream (v:0) to H.265 (libx265)
         cmdArgs << "-c:v" << "copy"
                 << "-c:v:0" << "libx265"
-                << "-preset" << m_settings["preset"].toString()
-                << "-crf" << QString::number(m_settings["crf"].toInt())
+                << "-preset" << m_settings["preset"].toString() // ultrafast, medium, veryslow, etc.
+                << "-crf" << QString::number(m_settings["crf"].toInt()) // Constant Rate Factor (quality scale)
                 << "-x265-params" << x265Params;
 
-        // Build video filters for encoding (specifically apply only to v:0)
+        // Build video filter pipelines (-filter:v:0)
         QStringList videoFilters;
         if (isInterlaced) {
+            // Apply double-framerate de-bob deinterlacer filter
             videoFilters << "bwdif=mode=send_field:parity=-1:deint=all";
         }
         if (needsDownscale) {
+            // Scale keeping aspect ratio using high-quality Lanczos scaling algorithm
             if (isPortrait) {
                 if (static_cast<double>(meta.height) / meta.width > 1920.0 / 1080.0) {
                     videoFilters << "scale=-2:1920:flags=lanczos";
@@ -347,62 +390,72 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             }
         }
         if (bobbed) {
+            // Downsample high frame rates back to half (typically 60fps to 30fps)
             double targetFps = effectiveFps / 2.0;
             videoFilters << QString("fps=fps=%1:round=down").arg(QString::number(targetFps, 'f', 6));
         }
+        // Force output color format to high-depth 10-bit YUV 4:2:0
         videoFilters << "format=yuv420p10le";
         
         cmdArgs << "-filter:v:0" << videoFilters.join(",");
         emit logSignal(QString("Video filters applied (to stream 0:v:0): %1").arg(videoFilters.join(",")));
     }
 
-    // Audio compression setup
+    // Set up Audio arguments
+    // Set up Audio arguments
     if (wantAudioCodec == "copy") {
-        cmdArgs << "-c:a" << "copy";
+        cmdArgs << "-c:a" << "copy"; // Stream copy audio
     } else {
         if (m_hasFdk) {
+            // Use high-performance Fraunhofer FDK encoder in Variable Bit Rate Mode 4
             cmdArgs << "-c:a" << "libfdk_aac" << "-vbr" << "4";
         } else {
+            // Use native AAC encoder in Variable Bit Rate mode (quality scale 1.5)
             cmdArgs << "-c:a" << "aac" << "-q:a" << "1.5";
         }
     }
 
-    // Map all video streams (main video + cover art images)
-    cmdArgs << "-c:s" << "copy"
-            << "-map" << "0:v"
-            << "-map" << "0:a?"
-            << "-map" << "0:s?"
-            << "-map" << "0:t?";
+    // Map all streams (subtitles, audio channels, attachments)
+    cmdArgs << "-c:s" << "copy" // Stream copy subtitles
+            << "-map" << "0:v"   // Map all video tracks
+            << "-map" << "0:a?"  // Map all audio tracks (optional)
+            << "-map" << "0:s?"  // Map all subtitle tracks (optional)
+            << "-map" << "0:t?"; // Map all attachment/font tracks (optional)
+    
+    // Set file metadata title to matches original filename without suffix
     cmdArgs << "-metadata" << "title=" + baseNoExt;
+    
+    // Maintain aspect ratio configurations
     if (!meta.displayAspectRatio.isEmpty() && meta.displayAspectRatio != "0:1") {
         cmdArgs << "-aspect" << meta.displayAspectRatio;
     }
-    cmdArgs << tmpOut;
+    cmdArgs << tmpOut; // Output filepath
 
     // Execute transcode process
     emit logSignal(QString("Executing: %1 %2").arg(ffmpegBin, cmdArgs.join(" ")));
     emit logSignal(QString("Encoding to: %1").arg(tmpOut));
     emit statusSignal(filepath, "Processing", "Transcoding...");
 
+    // 6. Launch the FFmpeg subprocess
     bool success = runFfmpegProcess(QStringList() << ffmpegBin << cmdArgs, meta.duration, filepath);
 
     if (success && QFile::exists(tmpOut)) {
-        // Successful transcode
+        // Successful transcode completed
         qint64 oldSize = fileInfo.size();
         qint64 newSize = QFileInfo(tmpOut).size();
         
-        // If we re-encoded the video and the file grew, discard the transcode to prevent bloat!
-        // (Unless it is an obsolete format, which we must always transcode and never remux)
+        // Bloat Protection check: If H.265 compression made the file LARGER, we discard the transcode!
+        // (Unless it was in an obsolete container, which we must always transcode to satisfy standards)
         if (wantVideoCodec == "libx265" && newSize >= oldSize && !isObsoleteFormat) {
             emit logSignal(QString("[NOTICE] Transcoded file (%1 MB) is larger than or equal to original (%2 MB). Discarding bloated transcode.")
                            .arg(QString::number(static_cast<double>(newSize)/(1024.0*1024.0), 'f', 1),
                                 QString::number(static_cast<double>(oldSize)/(1024.0*1024.0), 'f', 1)));
-            QFile::remove(tmpOut);
+            QFile::remove(tmpOut); // Remove the transcode file
             
             QString finalOut = QDir(fileDir).filePath(baseNoExt + ".mkv");
             
             if (fileInfo.suffix().toLower() == "mkv") {
-                // If original is already MKV, keep it in place
+                // If the original file was already in an MKV container, keep the original file in place
                 {
                     DatabaseManager db(m_dbPath);
                     db.recordProcessedFile(filepath, oldSize, oldSize, fileHash);
@@ -411,7 +464,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                 emit fileDoneSignal(filepath, "Skipped", oldSize, oldSize);
                 return true;
             } else {
-                // If original is not MKV, remux it to MKV container
+                // If original is NOT in an MKV container, we remux (stream copy) it to MKV
                 emit logSignal(QString("Remuxing original %1 directly to MKV container (stream copy)...").arg(baseName));
                 
                 QProcess remuxProc;
@@ -422,12 +475,14 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                 });
                 
                 if (remuxProc.waitForFinished() && remuxProc.exitCode() == 0 && QFile::exists(finalOut)) {
+                    // Trash the original file
                     bool trashed = moveToTrash(filepath, trashDir);
                     if (!trashed) {
                         emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
-                        trashed = QFile::remove(filepath);
+                        trashed = QFile::remove(filepath); // Fallback delete
                     }
 
+                    // Duplicate prevention safeguard: If both trashing and deletion fail, abort!
                     if (!trashed) {
                         emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up remuxed output to prevent duplicates.").arg(filepath));
                         if (QFile::exists(finalOut)) {
@@ -457,6 +512,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             }
         }
 
+        // Calculate space reduction percentage
         double ratio = (static_cast<double>(oldSize - newSize) / oldSize) * 100.0;
         
         emit logSignal(QString("[SUCCESS] Compressed %1 (Saved %2 MB, %3% space reduction)")
@@ -464,13 +520,14 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
                             QString::number(static_cast<double>(oldSize - newSize) / (1024.0 * 1024.0), 'f', 1),
                             QString::number(ratio, 'f', 1)));
 
-        // Move original to trash, rename temporary output to final
+        // 7. Move original file to trash
         bool trashed = moveToTrash(filepath, trashDir);
         if (!trashed) {
             emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
-            trashed = QFile::remove(filepath);
+            trashed = QFile::remove(filepath); // Fallback delete
         }
 
+        // Duplicate prevention safeguard: If original cannot be deleted, clean up output and abort!
         if (!trashed) {
             emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up temporary output to prevent duplicates.").arg(filepath));
             if (QFile::exists(tmpOut)) {
@@ -481,6 +538,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             return false;
         }
 
+        // 8. Place the finished MKV file in its final directory location
         QString finalOut = QDir(fileDir).filePath(baseNoExt + ".mkv");
         
         // Remove collision before rename
@@ -495,7 +553,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             return false;
         }
 
-        // Record in database
+        // 9. Record sizing statistics history in the global database
         {
             DatabaseManager db(m_dbPath);
             db.recordProcessedFile(finalOut, oldSize, newSize, fileHash);
@@ -515,7 +573,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             return false;
         }
 
-        // True FFmpeg failure
+        // True FFmpeg execution failure
         emit logSignal(QString("[ERROR] Transcoding failed for %1").arg(baseName));
         moveToErrors(filepath, errorDir);
         emit statusSignal(filepath, "Error", "FFmpeg failure");
@@ -524,11 +582,18 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     }
 }
 
+// Executes the FFmpeg command line process in the background.
+// Parses stdout/stderr logs in real-time to compute progress percentages, ETA, speeds,
+// and outputs live preview signals.
 bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, const QString &filepath)
 {
     m_activeProcess = new QProcess();
-    m_activeProcess->setProgram(cmd[0]);
-    m_activeProcess->setArguments(cmd.mid(1));
+    m_activeProcess->setProgram(cmd[0]); // First item is the binary name ("ffmpeg")
+    m_activeProcess->setArguments(cmd.mid(1)); // Remaining items are parameters
+    
+    // Merge standard output and standard error pipelines into a single stream.
+    // Under Linux, FFmpeg writes progress info to stderr. Merging channels allows
+    // real-time reading from a single descriptor.
     m_activeProcess->setProcessChannelMode(QProcess::MergedChannels);
 
     m_activeProcess->start();
@@ -544,10 +609,13 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
     QString lastEta = "N/A";
     double lastPreviewTime = -999.0;
 
+    // Continue loop while process is running or data remains in buffer
     while (m_activeProcess->state() == QProcess::Running || m_activeProcess->bytesAvailable() > 0) {
+        // Wait up to 100ms for incoming data
         if (m_activeProcess->waitForReadyRead(100) || m_activeProcess->bytesAvailable() > 0) {
             buffer.append(m_activeProcess->readAll());
             
+            // Read lines from buffer (split by \r or \n)
             int index;
             while (true) {
                 int idxN = buffer.indexOf('\n');
@@ -559,7 +627,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                 } else {
                     index = idxR;
                 }
-                if (index == -1) break;
+                if (index == -1) break; // Incomplete line, wait for more data
 
                 QByteArray lineBytes = buffer.left(index);
                 buffer.remove(0, index + 1);
@@ -567,7 +635,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                 QString line = QString::fromUtf8(lineBytes).trimmed();
                 if (line.isEmpty()) continue;
 
-                // Log filters: block FFmpeg verbosity & frame status ticker
+                // Log filters: identify progress lines and compiler headers
                 bool isProgress = line.contains("frame=") || line.contains("size=") || line.contains("time=");
                 bool isHeader = line.startsWith("ffmpeg version") || line.startsWith("built with") || 
                                 line.startsWith("configuration:") || line.startsWith("libav");
@@ -576,12 +644,12 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                     emit logSignal(QString("[DEBUG PROGRESS] Line: \"%1\"").arg(line));
                 }
                 if (!isProgress && !isHeader) {
-                    emit logSignal(line);
+                    emit logSignal(line); // Emit detailed milestone logs
                 }
 
-                // Parse progressive values
+                // 7. Parse progress variables from the FFmpeg ticker line
                 if (isProgress && duration > 0.0) {
-                    // Extract time (handles optional decimal seconds)
+                    // Extract time elapsed (matches formats like time=00:01:23.45)
                     QRegularExpression timeRe("time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)");
                     QRegularExpressionMatch timeMatch = timeRe.match(line);
                     if (timeMatch.hasMatch()) {
@@ -589,29 +657,34 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                         int m = timeMatch.captured(2).toInt();
                         double s = timeMatch.captured(3).toDouble();
                         double secs = h * 3600.0 + m * 60.0 + s;
+                        
+                        // If live previews are enabled, trigger frame thumbnail extraction
+                        // every 3 seconds of video timeline duration
                         if (m_livePreviewEnabled) {
                             if (secs >= lastPreviewTime + 3.0) {
                                 emit previewFrameSignal(filepath, secs);
                                 lastPreviewTime = secs;
                             }
                         }
+                        
+                        // Calculate percentage completion
                         int pct = static_cast<int>((secs / duration) * 100.0);
 
-                        // Extract fps
+                        // Extract frames per second (fps)
                         QRegularExpression fpsRe("fps=\\s*(\\d+(\\.\\d+)?)");
                         QRegularExpressionMatch fpsMatch = fpsRe.match(line);
                         if (fpsMatch.hasMatch()) {
                             lastFps = fpsMatch.captured(1).toDouble();
                         }
 
-                        // Extract speed
+                        // Extract speed factor (e.g. speed=2.3x)
                         QRegularExpression speedRe("speed=\\s*(\\d+(\\.\\d+)?)x");
                         QRegularExpressionMatch speedMatch = speedRe.match(line);
                         if (speedMatch.hasMatch()) {
                             lastSpeed = speedMatch.captured(1).toDouble();
                         }
 
-                        // Calculate ETA
+                        // Calculate Estimated Time of Arrival (ETA)
                         if (lastSpeed > 0.0) {
                             double remainingSecs = qMax(0.0, duration - secs);
                             int etaVal = static_cast<int>(remainingSecs / lastSpeed);
@@ -632,7 +705,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                             }
                         }
 
-                        // Get current and projected size on disk
+                        // Calculate current temporary file size on disk and project final size
                         qint64 outSizeBytes = 0;
                         try {
                             outSizeBytes = QFileInfo(cmd.last()).size();
@@ -643,14 +716,16 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
                             projectedSizeMb = (outSizeMb / pct) * 100.0;
                         }
 
+                        // Send progress update signal to UI cards
                         emit progressSignal(filepath, qMin(pct, 99), lastFps, lastSpeed, lastEta, outSizeMb, projectedSizeMb);
                     }
                 }
             }
         }
 
+        // Handle queue cancellations
         if (!m_isRunning) {
-            m_activeProcess->kill();
+            m_activeProcess->kill(); // Send terminate signal
             m_activeProcess->waitForFinished();
             break;
         }
@@ -663,6 +738,7 @@ bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, 
     return returnCode == 0;
 }
 
+// Moves original files to the workspace's trash folder (.Trash), preserving subdirectories.
 bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashDir)
 {
     try {
@@ -670,17 +746,18 @@ bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashD
         QString fileDir = fi.absolutePath();
         QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
         
-        // Target folder inside trashDir preserving folder structure
+        // Re-construct the relative directory hierarchy inside the Trash folder
         QString targetTrashDir = trashDir;
         if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
             targetTrashDir = QDir(trashDir).filePath(relDir);
         }
 
-        // Convert target directory to native separators to support UNC network shares on Windows
+        // Convert path separators to native format to support Windows UNC network shares
         QDir().mkpath(QDir::toNativeSeparators(targetTrashDir));
         QString baseName = fi.fileName();
         QString dest = QDir(targetTrashDir).filePath(baseName);
         
+        // If a file with the same name already exists in trash, append the file's modification timestamp to prevent collision
         if (QFile::exists(dest)) {
             QString baseNoExt = fi.completeBaseName();
             QString ext = fi.suffix();
@@ -688,7 +765,6 @@ bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashD
             dest = QDir(targetTrashDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
         }
 
-        // Convert source and destination to native separators before moving
         QString nativeSrc = QDir::toNativeSeparators(filepath);
         QString nativeDest = QDir::toNativeSeparators(dest);
 
@@ -704,6 +780,7 @@ bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashD
     return false;
 }
 
+// Moves failed source files to the errors folder (.Errors), preserving folder subdirectories.
 void TranscodeWorker::moveToErrors(const QString &filepath, const QString &errorDir)
 {
     try {
@@ -711,17 +788,18 @@ void TranscodeWorker::moveToErrors(const QString &filepath, const QString &error
         QString fileDir = fi.absolutePath();
         QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
         
-        // Target folder inside errorDir preserving folder structure
+        // Re-construct relative directory hierarchy inside the Errors folder
         QString targetErrorDir = errorDir;
         if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
             targetErrorDir = QDir(errorDir).filePath(relDir);
         }
 
-        // Convert target directory to native separators to support UNC network shares on Windows
+        // Convert path separators to native format
         QDir().mkpath(QDir::toNativeSeparators(targetErrorDir));
         QString baseName = fi.fileName();
         QString dest = QDir(targetErrorDir).filePath(baseName);
         
+        // Append modification timestamp if file name collision occurs
         if (QFile::exists(dest)) {
             QString baseNoExt = fi.completeBaseName();
             QString ext = fi.suffix();
@@ -729,7 +807,6 @@ void TranscodeWorker::moveToErrors(const QString &filepath, const QString &error
             dest = QDir(targetErrorDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
         }
 
-        // Convert source and destination to native separators before moving
         QString nativeSrc = QDir::toNativeSeparators(filepath);
         QString nativeDest = QDir::toNativeSeparators(dest);
 
