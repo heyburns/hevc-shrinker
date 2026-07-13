@@ -198,6 +198,7 @@ void MainWindow::initUi()
 
     m_menuFile->addSeparator();
     m_actExit = m_menuFile->addAction("Exit");
+    m_actExit->setMenuRole(QAction::QuitRole);
     connect(m_actExit, &QAction::triggered, this, &MainWindow::onExitSelected);
 
     // View Menu
@@ -251,6 +252,7 @@ void MainWindow::initUi()
     connect(actGuide, &QAction::triggered, this, &MainWindow::onUsageGuideSelected);
     
     QAction *actAbout = m_menuHelp->addAction("About HEVC Video Shrinker");
+    actAbout->setMenuRole(QAction::AboutRole);
     connect(actAbout, &QAction::triggered, this, &MainWindow::onAboutSelected);
 
     // 2. Central Widget layout

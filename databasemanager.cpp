@@ -8,6 +8,7 @@
 #include <QThread>
 #include <QDebug>
 #include <QStandardPaths>
+#include <QUrl>
 
 // Helper function to resolve the absolute path to the global database file.
 // The database is stored inside the user's system profile folder (e.g., ~/.local/share/hevc_shrinker/ on Linux
@@ -86,15 +87,14 @@ QSqlDatabase DatabaseManager::db()
     // Use the raw absolute path directly without URI prefix.
     newDb.setDatabaseName(m_dbPath);
 #else
-    // On Linux/Unix, set the connection option to parse URIs.
+    // On Linux/Unix/macOS, set the connection option to parse URIs.
     // Setting `nolock=1` bypasses SQLite's OS file-locking syscalls (lockf/LockFileEx),
     // which prevents "database is locked" errors when the database runs on network CIFS/SMB mounts.
     newDb.setConnectOptions("QSQLITE_OPEN_URI_ARGUMENTS");
     
-    QString uriPath = m_dbPath;
-    uriPath.replace("\\", "/");
-    // Prefix with file:// for standard absolute path URI resolution
-    QString uriDbPath = QString("file://%1?nolock=1").arg(uriPath);
+    // Utilize QUrl to safely translate the local path to a percent-encoded file URI.
+    // This prevents database open failures if paths contain spaces or non-ASCII characters.
+    QString uriDbPath = QUrl::fromLocalFile(m_dbPath).toString() + "?nolock=1";
     newDb.setDatabaseName(uriDbPath);
 #endif
     

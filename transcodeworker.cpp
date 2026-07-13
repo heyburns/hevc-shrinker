@@ -30,11 +30,19 @@ QString findDependency(const QString &name) {
     QString path = QStandardPaths::findExecutable(name);
     if (!path.isEmpty()) return path;
 
-    QString localPath = QCoreApplication::applicationDirPath() + "/" + name;
+    QString appDir = QCoreApplication::applicationDirPath();
+    QString localPath = appDir + "/" + name;
 #ifdef Q_OS_WIN
     localPath += ".exe"; // Append suffix on Windows
 #endif
     if (QFile::exists(localPath)) return localPath;
+
+#ifdef Q_OS_MAC
+    // On macOS, check inside the app bundle's Resources directory as well
+    QString macResourcesPath = appDir + "/../Resources/" + name;
+    if (QFile::exists(macResourcesPath)) return macResourcesPath;
+#endif
+
     return ""; // Not found
 }
 
