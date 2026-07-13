@@ -24,8 +24,8 @@ Many video converters will blindly re-process every file you give them, which ta
 Before running the application, you need to make sure you have FFmpeg and FFprobe installed. They do the actual heavy lifting of reading, analyzing, and writing the video files:
 
 *   **Windows**: Download FFmpeg and FFprobe, and make sure the executables (ffmpeg.exe and ffprobe.exe) are either in your system's PATH, or placed in the same folder as this application's executable.
-*   **Linux**: Install them via your package manager (e.g., `sudo apt install ffmpeg` on Debian/Ubuntu, `sudo pacman -S ffmpeg` on Arch, or emerge `media-video/ffmpeg` on Gentoo).
-*   **macOS**: Can be installed via Homebrew (`brew install ffmpeg`), though please see the compatibility note below.
+*   **Linux**: Install them via your package manager (e.g., `sudo apt install ffmpeg` on Debian/Ubuntu, `sudo dnf install ffmpeg` on Fedora (requires RPM Fusion), `sudo pacman -S ffmpeg` on Arch, or emerge `media-video/ffmpeg` on Gentoo).
+*   **macOS**: Can be installed via Homebrew (`brew install ffmpeg`) or MacPorts (`sudo port install ffmpeg`), though please see the compatibility note below.
 
 ## How to use the application
 
@@ -58,6 +58,7 @@ cmake --build build --config Release
 ### Linux
 Make sure you have Qt6 development packages installed:
 *   **Debian/Ubuntu**: `sudo apt install build-essential cmake qt6-base-dev libqt6sql6-sqlite`
+*   **Fedora**: `sudo dnf install gcc-c++ cmake qt6-qtbase-devel`
 *   **Arch Linux**: `sudo pacman -S base-devel cmake qt6-base`
 *   **Gentoo**: emerge `dev-build/cmake dev-qt/qtwidgets dev-qt/qtsql` (ensure the sqlite USE flag is enabled for Qt)
 
