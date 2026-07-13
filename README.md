@@ -84,7 +84,7 @@ If you want to run the app from a thumb drive or share it easily without an inst
    ```powershell
    python package_portable.py
    ```
-This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_1.0_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
+This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_2.0_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
 
 #### Installer version
 I have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Opening setup.iss in Inno Setup and compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.

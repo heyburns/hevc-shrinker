@@ -15,6 +15,9 @@
 #include <QDebug>
 #include <QScrollArea>
 #include <QMenu>
+#include <QMenuBar>
+#include <QInputDialog>
+#include <QActionGroup>
 #include <QDesktopServices>
 #include <QUrl>
 
@@ -23,35 +26,24 @@
 // -------------------------------------------------------------
 
 // Constructor: Initializes the card's widgets and layouts for a specific file.
+// Constructor: Initializes the card's widgets and layouts for a specific file.
 TranscodeMonitorCard::TranscodeMonitorCard(const QString &filepath, QWidget *parent)
-    : QGroupBox("Active Transcode Monitor", parent)
+    : QFrame(parent)
     , m_filepath(filepath)
     , m_startTime(0)
 {
-    // Apply styling: thin borders, rounded corners, and clear fonts
+    setObjectName("TranscodeMonitorCard");
+    // Apply styling: thin borders, rounded corners, and clear fonts for top level QFrame container only
     setStyleSheet(
-        "QGroupBox { font-weight: bold; border: 1px solid palette(mid); border-radius: 4px; margin-top: 6px; padding-top: 10px; background-color: palette(window); }"
+        "QFrame#TranscodeMonitorCard { border: 1px solid palette(mid); border-radius: 4px; background-color: palette(window); }"
     );
-    setFixedWidth(460); // Card width with preview enabled
-    setFixedHeight(170); // Fixed height to fit progress details cleanly
+    setFrameShape(QFrame::StyledPanel);
+    setFixedHeight(88); // Collapse height to be extremely compact
+    setMinimumWidth(280);
 
-    // Horizontal layout splits card into: [Left: Preview Box] | [Right: Details Panel]
-    QHBoxLayout *mainCardLayout = new QHBoxLayout(this);
-    mainCardLayout->setContentsMargins(8, 8, 8, 8);
-    mainCardLayout->setSpacing(8);
-
-    // Left Side: Square Preview Label
-    m_lblPreview = new QLabel("Preview Off");
-    m_lblPreview->setAlignment(Qt::AlignCenter);
-    m_lblPreview->setFixedSize(140, 140);
-    m_lblPreview->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
-    mainCardLayout->addWidget(m_lblPreview);
-
-    // Right Side: Info and Progress Widget
-    QWidget *infoWidget = new QWidget();
-    QVBoxLayout *infoLayout = new QVBoxLayout(infoWidget);
-    infoLayout->setContentsMargins(0, 0, 0, 0);
-    infoLayout->setSpacing(4);
+    QVBoxLayout *mainCardLayout = new QVBoxLayout(this);
+    mainCardLayout->setContentsMargins(6, 6, 6, 6);
+    mainCardLayout->setSpacing(2);
 
     // Row 0: File Name Display
     QHBoxLayout *row0 = new QHBoxLayout();
@@ -59,59 +51,42 @@ TranscodeMonitorCard::TranscodeMonitorCard(const QString &filepath, QWidget *par
     m_lblFile = new QLabel(QFileInfo(filepath).fileName());
     m_lblFile->setStyleSheet("font-weight: bold;");
     row0->addWidget(m_lblFile, 1);
-    infoLayout->addLayout(row0);
+    mainCardLayout->addLayout(row0);
 
-    // Row 1: Speed and Frames Per Second
+    // Row 1: Speed and FPS
     QHBoxLayout *row1 = new QHBoxLayout();
     row1->addWidget(new QLabel("Speed/FPS:"));
     m_lblPerf = new QLabel("N/A");
     m_lblPerf->setStyleSheet("font-weight: bold;");
     row1->addWidget(m_lblPerf, 1);
-    infoLayout->addLayout(row1);
+    mainCardLayout->addLayout(row1);
 
-    // Row 2: Timing Statistics (Elapsed and Remaining)
-    QHBoxLayout *row2 = new QHBoxLayout();
-    row2->addWidget(new QLabel("Time:"));
-    m_lblTime = new QLabel("N/A");
-    m_lblTime->setStyleSheet("font-weight: bold;");
-    row2->addWidget(m_lblTime, 1);
-    infoLayout->addLayout(row2);
-
-    // Row 3: Progress Bar Widget
+    // Row 2: Progress Bar Widget
     m_progressBar = new QProgressBar();
     m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     m_progressBar->setTextVisible(true);
     m_progressBar->setAlignment(Qt::AlignCenter);
-    m_progressBar->setFixedHeight(18);
+    m_progressBar->setFixedHeight(14);
     m_progressBar->setStyleSheet(
         "QProgressBar { border: 1px solid palette(mid); border-radius: 3px; text-align: center; } QProgressBar::chunk { background-color: palette(highlight); }"
     );
-    infoLayout->addWidget(m_progressBar);
+    mainCardLayout->addWidget(m_progressBar);
 
-    // Row 4: Sizing Statistics (Current size / projected size / original size)
-    QHBoxLayout *row4 = new QHBoxLayout();
-    row4->addWidget(new QLabel("Size:"));
-    m_lblSize = new QLabel("N/A");
-    m_lblSize->setStyleSheet("font-weight: bold;");
-    row4->addWidget(m_lblSize, 1);
-    infoLayout->addLayout(row4);
-
-    mainCardLayout->addWidget(infoWidget, 1);
-
-    // Initialize the background image extraction Process
-    m_previewProcess = new QProcess(this);
-    connect(m_previewProcess, &QProcess::readyReadStandardOutput, this, &TranscodeMonitorCard::onPreviewDataAvailable);
-    connect(m_previewProcess, &QProcess::finished, this, &TranscodeMonitorCard::onPreviewProcessFinished);
+    // Row 3: Stats Details (Time & Size compact grid)
+    QHBoxLayout *row3 = new QHBoxLayout();
+    m_lblTime = new QLabel("Time: N/A");
+    m_lblTime->setStyleSheet("font-size: 10px;");
+    m_lblSize = new QLabel("Size: N/A");
+    m_lblSize->setStyleSheet("font-size: 10px;");
+    row3->addWidget(m_lblTime, 1);
+    row3->addWidget(m_lblSize, 1);
+    mainCardLayout->addLayout(row3);
 }
 
-// Destructor: Safely terminates any running preview generation process
+// Destructor
 TranscodeMonitorCard::~TranscodeMonitorCard()
 {
-    if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-        m_previewProcess->kill();
-        m_previewProcess->waitForFinished();
-    }
 }
 
 // Updates statistics text boxes and progress bars on the active card.
@@ -132,16 +107,15 @@ void TranscodeMonitorCard::updateProgress(int percentage, double fps, double spe
     // Display sizing details. Hide projection until at least 3% is processed to avoid math skew.
     if (percentage >= 3) {
         m_lblSize->setText(
-            QString("%1 MB / ~%2 MB (Orig: %3 MB)")
+            QString("Size: %1 MB / ~%2 MB (Orig: %3 MB)")
                 .arg(QString::number(outSizeMb, 'f', 1),
                      QString::number(projectedSizeMb, 'f', 1),
                      QString::number(static_cast<double>(QFileInfo(m_filepath).size()) / (1024.0 * 1024.0), 'f', 1))
         );
     } else {
         m_lblSize->setText(
-            QString("%1 MB / Calculating... (Orig: %2 MB)")
-                .arg(QString::number(outSizeMb, 'f', 1),
-                     QString::number(static_cast<double>(QFileInfo(m_filepath).size()) / (1024.0 * 1024.0), 'f', 1))
+            QString("Size: %1 MB / Calculating...")
+                .arg(QString::number(outSizeMb, 'f', 1))
         );
     }
 
@@ -158,86 +132,6 @@ void TranscodeMonitorCard::updateStatus(const QString &status, const QString &de
         m_lblTime->setText("N/A");
         m_lblSize->setText("N/A");
         m_progressBar->setValue(0);
-        m_lblPreview->clear();
-        m_lblPreview->setText("Preview Off");
-    }
-}
-
-// Asynchronously seek extracts a frame thumbnail at a specific second using FFmpeg image piping
-void TranscodeMonitorCard::requestFramePreview(double secs)
-{
-    // Skip if a seek process is already running on this card
-    if (m_previewProcess->state() != QProcess::NotRunning) {
-        return;
-    }
-
-    QString ffmpeg = findDependency("ffmpeg");
-    if (ffmpeg.isEmpty()) return;
-
-    m_previewBuffer.clear();
-
-    // Convert seconds to HH:MM:SS.ms string required by FFmpeg seek parameter
-    int h = static_cast<int>(secs / 3600);
-    int m = static_cast<int>((secs - h * 3600) / 60);
-    int s = static_cast<int>(secs - h * 3600 - m * 60);
-    int ms = static_cast<int>((secs - h * 3600 - m * 60 - s) * 1000);
-    QString timeStr = QString("%1:%2:%3.%4")
-                      .arg(h, 2, 10, QChar('0'))
-                      .arg(m, 2, 10, QChar('0'))
-                      .arg(s, 2, 10, QChar('0'))
-                      .arg(ms, 3, 10, QChar('0'));
-
-    // Launch seeking process. Pipes binary PNG bytes into stdout.
-    m_previewProcess->start(ffmpeg, {
-        "-y",
-        "-ss", timeStr, // Fast seek before input
-        "-i", m_filepath,
-        "-vf", "scale=140:-1", // Downscale width to 140px, keep aspect height
-        "-frames:v", "1", // Extract 1 frame
-        "-f", "image2pipe", // Output as image stream
-        "-vcodec", "png", // Encode as PNG image
-        "-"
-    });
-}
-
-// Appends buffered byte chunks received from FFmpeg stdout pipe
-void TranscodeMonitorCard::onPreviewDataAvailable()
-{
-    m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
-}
-
-// Renders the extracted image to the preview box upon process completion
-void TranscodeMonitorCard::onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
-{
-    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-        m_previewBuffer.append(m_previewProcess->readAllStandardOutput());
-        if (!m_previewBuffer.isEmpty()) {
-            QPixmap pixmap;
-            if (pixmap.loadFromData(m_previewBuffer, "PNG")) {
-                QPixmap scaledPixmap = pixmap.scaled(m_lblPreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                m_lblPreview->setPixmap(scaledPixmap);
-            }
-        }
-    }
-    m_previewBuffer.clear();
-}
-
-// Toggles preview box visibility on the card.
-// If visible is false, hides the preview frame and collapses the card's width to 310px.
-void TranscodeMonitorCard::setPreviewVisible(bool visible)
-{
-    m_lblPreview->setVisible(visible); // Hide or show the square preview container
-    setFixedWidth(visible ? 460 : 310); // Shrink card width if preview is disabled
-    
-    // If turning preview off, kill any active thumbnail extraction process to free CPU cycles
-    if (!visible) {
-        m_lblPreview->clear();
-        m_lblPreview->setText("Preview Off");
-        if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-            m_previewProcess->kill();
-            m_previewProcess->waitForFinished();
-        }
-        m_previewBuffer.clear();
     }
 }
 
@@ -246,6 +140,13 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_dbManager(nullptr)
     , m_isQueueRunning(false)
+    , m_viewfinderProcess(nullptr)
+    , m_crf(28)
+    , m_preset("medium")
+    , m_downscale(true)
+    , m_debob(true)
+    , m_livePreviewEnabled(false)
+    , m_concurrentLimit(1)
 {
     initUi(); // Build the window layouts and components
     checkDependencies(); // Verify if ffmpeg/ffprobe exist
@@ -265,16 +166,94 @@ MainWindow::~MainWindow()
         worker->wait(); // Join thread execution
     }
     m_workers.clear();
+
+    if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
+        m_viewfinderProcess->kill();
+        m_viewfinderProcess->waitForFinished();
+    }
+    delete m_viewfinderProcess;
     delete m_dbManager; // Release global database object handle
 }
 
 // Builds the graphical layout, sidebar configurations, grid tables, and status meters.
+// Builds the graphical layout, sidebar configurations, grid tables, and status meters.
 void MainWindow::initUi()
 {
-    setWindowTitle("HEVC Video Shrinker v1.0");
+    setWindowTitle("HEVC Video Shrinker v2.0");
     resize(1050, 620); // Widened default window size to fit columns without clipping text
 
-    // Create the central container widget
+    // 1. Create the Menu Bar
+    m_menuBar = new QMenuBar(this);
+    setMenuBar(m_menuBar);
+
+    // File Menu
+    m_menuFile = m_menuBar->addMenu("File");
+    m_actOpen = m_menuFile->addAction("Open Workspace Folder...");
+    m_actOpen->setShortcut(QKeySequence::Open);
+    connect(m_actOpen, &QAction::triggered, this, &MainWindow::selectDirectory);
+
+    m_actScan = m_menuFile->addAction("Scan Directory");
+    m_actScan->setShortcut(QKeySequence(Qt::Key_F5));
+    connect(m_actScan, &QAction::triggered, this, &MainWindow::onScanSelected);
+
+    m_menuFile->addSeparator();
+    m_actExit = m_menuFile->addAction("Exit");
+    connect(m_actExit, &QAction::triggered, this, &MainWindow::onExitSelected);
+
+    // View Menu
+    m_menuView = m_menuBar->addMenu("View");
+    m_actShowPreview = m_menuView->addAction("Show Live Preview");
+    m_actShowPreview->setCheckable(true);
+    m_actShowPreview->setChecked(m_livePreviewEnabled);
+    connect(m_actShowPreview, &QAction::toggled, this, &MainWindow::onTogglePreviewSelected);
+
+    // Options Menu
+    m_menuOptions = m_menuBar->addMenu("Options");
+    
+    m_actCrf = m_menuOptions->addAction("Transcode Quality (CRF)...");
+    connect(m_actCrf, &QAction::triggered, this, &MainWindow::onCrfSelected);
+
+    // Preset Speed Submenu
+    m_menuPreset = m_menuOptions->addMenu("Speed Preset");
+    m_presetGroup = new QActionGroup(this);
+    QStringList presets = {"ultrafast", "superfast", "veryfast", "fast", "medium", "slow", "slower", "veryslow"};
+    for (const QString &p : presets) {
+        QAction *actP = m_menuPreset->addAction(p);
+        actP->setCheckable(true);
+        if (p == m_preset) actP->setChecked(true);
+        m_presetGroup->addAction(actP);
+    }
+    connect(m_presetGroup, &QActionGroup::triggered, this, &MainWindow::onPresetSelected);
+
+    m_actConcurrency = m_menuOptions->addAction("Max Concurrent Encodes...");
+    connect(m_actConcurrency, &QAction::triggered, this, &MainWindow::onConcurrencySelected);
+
+    m_menuOptions->addSeparator();
+
+    m_actDownscale = m_menuOptions->addAction("Downscale 4K/UHD to 1080p");
+    m_actDownscale->setCheckable(true);
+    m_actDownscale->setChecked(m_downscale);
+    connect(m_actDownscale, &QAction::toggled, this, &MainWindow::onDownscaleToggled);
+
+    m_actDebob = m_menuOptions->addAction("High frame-rate de-bob (bwdif)");
+    m_actDebob->setCheckable(true);
+    m_actDebob->setChecked(m_debob);
+    connect(m_actDebob, &QAction::toggled, this, &MainWindow::onDebobToggled);
+
+    m_menuOptions->addSeparator();
+
+    m_actResetConfig = m_menuOptions->addAction("Restore settings to defaults");
+    connect(m_actResetConfig, &QAction::triggered, this, &MainWindow::onResetConfigSelected);
+
+    // Help Menu
+    m_menuHelp = m_menuBar->addMenu("Help");
+    QAction *actGuide = m_menuHelp->addAction("Usage Guide");
+    connect(actGuide, &QAction::triggered, this, &MainWindow::onUsageGuideSelected);
+    
+    QAction *actAbout = m_menuHelp->addAction("About HEVC Video Shrinker");
+    connect(actAbout, &QAction::triggered, this, &MainWindow::onAboutSelected);
+
+    // 2. Central Widget layout
     QWidget *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
     QHBoxLayout *mainLayout = new QHBoxLayout(centralWidget);
@@ -285,134 +264,103 @@ void MainWindow::initUi()
     QSplitter *rightSplitter = new QSplitter(Qt::Vertical);
     rightSplitter->setHandleWidth(4);
 
-    // 1. Queue Table Group Box
+    // Queue Table Group Box
     QGroupBox *tableGroup = new QGroupBox("Videos scan queue");
     QVBoxLayout *tableLayout = new QVBoxLayout(tableGroup);
     tableLayout->setContentsMargins(5, 10, 5, 5);
 
-    // Initialize 6-column Table Grid
     m_tableQueue = new QTableWidget(0, 6);
     m_tableQueue->setHorizontalHeaderLabels({
         "Filename", "Status", "Original Size", "Compressed Size", "Progress", "Path"
     });
-    m_tableQueue->setSelectionBehavior(QAbstractItemView::SelectRows); // Select entire row
-    m_tableQueue->setEditTriggers(QAbstractItemView::NoEditTriggers); // Read-only cells
-    m_tableQueue->setContextMenuPolicy(Qt::CustomContextMenu); // Custom context menu trigger
+    m_tableQueue->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_tableQueue->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tableQueue->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tableQueue, &QTableWidget::customContextMenuRequested, this, &MainWindow::showTableContextMenu);
+    // Connect table row selection change signal
+    connect(m_tableQueue, &QTableWidget::itemSelectionChanged, this, &MainWindow::onQueueTableSelectionChanged);
 
-    // Configure headers to be interactive resizable columns
     QHeaderView *header = m_tableQueue->horizontalHeader();
     for (int col = 0; col < 6; ++col) {
         header->setSectionResizeMode(col, QHeaderView::Interactive);
     }
-    header->setStretchLastSection(true); // Let Path column stretch to fill remainder space
+    header->setStretchLastSection(true);
 
-    // Set fixed widths for sizing columns to prevent text clipping
-    m_tableQueue->setColumnWidth(0, 140); // Filename
-    m_tableQueue->setColumnWidth(1, 80);  // Status
-    m_tableQueue->setColumnWidth(2, 95);  // Original Size
-    m_tableQueue->setColumnWidth(3, 115); // Compressed Size
-    m_tableQueue->setColumnWidth(4, 160); // Progress details
-    m_tableQueue->setColumnWidth(5, 100); // Path (relative directory)
+    m_tableQueue->setColumnWidth(0, 140);
+    m_tableQueue->setColumnWidth(1, 80);
+    m_tableQueue->setColumnWidth(2, 95);
+    m_tableQueue->setColumnWidth(3, 115);
+    m_tableQueue->setColumnWidth(4, 160);
+    m_tableQueue->setColumnWidth(5, 100);
 
     tableLayout->addWidget(m_tableQueue);
     rightSplitter->addWidget(tableGroup);
 
-    // 2. Active Monitor dashboard area
+    // Active Monitor dashboard area (Compact vertical stack inside scroll area)
     QWidget *bottomDashboard = new QWidget();
-    QHBoxLayout *bottomLayout = new QHBoxLayout(bottomDashboard);
+    QVBoxLayout *bottomLayout = new QVBoxLayout(bottomDashboard);
     bottomLayout->setContentsMargins(0, 0, 0, 0);
-    bottomLayout->setSpacing(10);
+    bottomLayout->setSpacing(5);
 
-    // Scrollable area for dynamically spawned active transcode cards
     QScrollArea *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
     scrollArea->setFrameShape(QFrame::NoFrame);
-    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // Disable vertical scrolling
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded); // Enable horizontal scrolling
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     m_monitorsContainer = new QWidget();
-    m_monitorsLayout = new QHBoxLayout(m_monitorsContainer);
+    m_monitorsLayout = new QVBoxLayout(m_monitorsContainer);
     m_monitorsLayout->setContentsMargins(0, 0, 0, 0);
-    m_monitorsLayout->setSpacing(10);
-    m_monitorsLayout->addStretch(); // Push progress cards to the left initially
+    m_monitorsLayout->setSpacing(6);
+    m_monitorsLayout->addStretch(); // Push progress cards to top initially
 
     scrollArea->setWidget(m_monitorsContainer);
     bottomLayout->addWidget(scrollArea, 1);
 
     rightSplitter->addWidget(bottomDashboard);
-    rightSplitter->setSizes({420, 200}); // Setup split proportions
+    rightSplitter->setSizes({420, 200});
 
-    // Right Panel: Control Config Sidebar
+    // Right Sidebar Layout
     QWidget *leftContainer = new QWidget();
     leftContainer->setFixedWidth(310);
     QVBoxLayout *leftLayout = new QVBoxLayout(leftContainer);
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(10);
 
-    // Sidebar settings container
-    QGroupBox *ctrlGroup = new QGroupBox("Shrinker configuration");
-    QVBoxLayout *ctrlLayout = new QVBoxLayout(ctrlGroup);
-    ctrlLayout->setContentsMargins(10, 15, 10, 10);
-    ctrlLayout->setSpacing(10);
+    // Settings Configuration summary label
+    m_lblConfigSummary = new QLabel();
+    m_lblConfigSummary->setWordWrap(true);
+    m_lblConfigSummary->setStyleSheet("font-weight: bold; font-size: 11px; padding: 4px; border: 1px solid palette(mid); border-radius: 4px; background-color: palette(alternate-base);");
+    updateConfigSummaryText();
+    leftLayout->addWidget(m_lblConfigSummary);
 
-    // Workspace Input Box
-    ctrlLayout->addWidget(new QLabel("Workspace Folder:"));
-    QHBoxLayout *dirInputLayout = new QHBoxLayout();
-    m_dirInput = new QLineEdit();
-    m_dirInput->setReadOnly(true);
-    m_dirInput->setPlaceholderText("Select video folder...");
-    m_btnBrowse = new QPushButton("Browse");
-    connect(m_btnBrowse, &QPushButton::clicked, this, &MainWindow::selectDirectory);
-    dirInputLayout->addWidget(m_dirInput);
-    dirInputLayout->addWidget(m_btnBrowse);
-    ctrlLayout->addLayout(dirInputLayout);
+    // Live Viewfinder monitor frame
+    m_viewfinderGroup = new QGroupBox("Live Viewfinder");
+    QVBoxLayout *viewfinderLayout = new QVBoxLayout(m_viewfinderGroup);
+    viewfinderLayout->setContentsMargins(10, 10, 10, 10);
+    viewfinderLayout->setSpacing(6);
 
-    // Quality Spinner (CRF)
-    ctrlLayout->addWidget(new QLabel("CRF Quality (higher = smaller file):"));
-    m_spinCrf = new QSpinBox();
-    m_spinCrf->setRange(0, 51);
-    m_spinCrf->setValue(28); // Standard H.265 default crf is 28
-    ctrlLayout->addWidget(m_spinCrf);
+    m_lblViewfinder = new QLabel("Standby / Select active encode");
+    m_lblViewfinder->setAlignment(Qt::AlignCenter);
+    m_lblViewfinder->setFixedSize(240, 240);
+    m_lblViewfinder->setStyleSheet("background-color: black; border: 1px solid palette(mid); border-radius: 4px; color: gray; font-weight: bold;");
+    viewfinderLayout->addWidget(m_lblViewfinder, 0, Qt::AlignCenter);
 
-    // Speed Preset Selector
-    ctrlLayout->addWidget(new QLabel("FFmpeg CPU Speed Preset:"));
-    m_comboPreset = new QComboBox();
-    m_comboPreset->addItems({
-        "ultrafast", "superfast", "veryfast", "fast", "medium", "slow", "slower", "veryslow"
-    });
-    m_comboPreset->setCurrentText("medium");
-    ctrlLayout->addWidget(m_comboPreset);
+    m_lblViewfinderStatus = new QLabel("Now Viewing: Standby");
+    m_lblViewfinderStatus->setStyleSheet("font-weight: bold; font-size: 11px;");
+    viewfinderLayout->addWidget(m_lblViewfinderStatus);
 
-    // UHD/4K Downscale Checkbox
-    m_chkDownscale = new QCheckBox("Downscale 4K/UHD to 1080p");
-    m_chkDownscale->setChecked(true);
-    ctrlLayout->addWidget(m_chkDownscale);
+    m_lblViewfinderTime = new QLabel("Current Time: N/A");
+    m_lblViewfinderTime->setStyleSheet("font-size: 11px;");
+    viewfinderLayout->addWidget(m_lblViewfinderTime);
 
-    // High Frame Rate De-bob Checkbox
-    m_chkDebob = new QCheckBox("High frame-rate de-bob (bwdif)");
-    m_chkDebob->setChecked(true);
-    ctrlLayout->addWidget(m_chkDebob);
+    leftLayout->addWidget(m_viewfinderGroup);
+    m_viewfinderGroup->setVisible(m_livePreviewEnabled);
 
-    // Live Progress Preview Checkbox (Privacy Toggle)
-    m_chkPreview = new QCheckBox("Enable Live Progress Preview");
-    m_chkPreview->setChecked(false); // Off by default for privacy
-    ctrlLayout->addWidget(m_chkPreview);
-
-    // Max Concurrent Encodes Selector
-    ctrlLayout->addWidget(new QLabel("Max Concurrent Encodes:"));
-    m_spinConcurrent = new QSpinBox();
-    m_spinConcurrent->setRange(1, 16);
-    m_spinConcurrent->setValue(1);
-    ctrlLayout->addWidget(m_spinConcurrent);
-    connect(m_spinConcurrent, &QSpinBox::valueChanged, this, &MainWindow::onConcurrentChanged);
-
-    // Reset Configuration Defaults Button
-    m_btnReset = new QPushButton("Restore settings back to defaults");
-    connect(m_btnReset, &QPushButton::clicked, this, &MainWindow::resetSettings);
-    ctrlLayout->addWidget(m_btnReset);
-
-    leftLayout->addWidget(ctrlGroup);
+    // Initialize Viewfinder Process
+    m_viewfinderProcess = new QProcess(this);
+    connect(m_viewfinderProcess, &QProcess::readyReadStandardOutput, this, &MainWindow::onViewfinderDataAvailable);
+    connect(m_viewfinderProcess, &QProcess::finished, this, &MainWindow::onViewfinderProcessFinished);
 
     // Status Panel (FFmpeg & FFprobe tool checks)
     QGroupBox *statusGroup = new QGroupBox("Tools & binaries dependencies status");
@@ -432,7 +380,7 @@ void MainWindow::initUi()
 
     leftLayout->addWidget(statusGroup);
 
-    // Savings dashboard scorecard layout
+    // Space Savings Scoreboard
     QGroupBox *savingsGroup = new QGroupBox("Space Savings Scoreboard");
     QGridLayout *savingsLayout = new QGridLayout(savingsGroup);
     savingsLayout->setContentsMargins(10, 12, 10, 10);
@@ -457,7 +405,6 @@ void MainWindow::initUi()
     m_lblDashboardPct = new QLabel("0.0%");
     savingsLayout->addWidget(m_lblDashboardPct, 3, 1);
 
-    // Database Reset Buttons (Workspace-scoped)
     m_btnResetDb = new QPushButton("Reset Database");
     m_btnResetDb->setEnabled(false);
     connect(m_btnResetDb, &QPushButton::clicked, this, &MainWindow::onResetDbClicked);
@@ -473,14 +420,14 @@ void MainWindow::initUi()
 
     leftLayout->addWidget(savingsGroup);
 
-    // Action Execution Buttons (Scan, Start, and Abort)
+    // Action Execution Buttons
     QVBoxLayout *actionsLayout = new QVBoxLayout();
     actionsLayout->setSpacing(6);
 
     m_btnScan = new QPushButton("Scan Directory");
     m_btnScan->setEnabled(false);
     m_btnScan->setFixedHeight(28);
-    connect(m_btnScan, &QPushButton::clicked, this, &MainWindow::scanDirectory);
+    connect(m_btnScan, &QPushButton::clicked, this, &MainWindow::onScanSelected);
     actionsLayout->addWidget(m_btnScan);
 
     QHBoxLayout *queueActionsLayout = new QHBoxLayout();
@@ -503,11 +450,28 @@ void MainWindow::initUi()
     actionsLayout->addLayout(queueActionsLayout);
 
     leftLayout->addLayout(actionsLayout);
-    leftLayout->addStretch(); // Spacers push elements up
+    leftLayout->addStretch();
 
-    // Add Splitters to core Layout
     mainLayout->addWidget(rightSplitter, 1);
     mainLayout->addWidget(leftContainer, 0);
+}
+
+void MainWindow::updateConfigSummaryText()
+{
+    QString summary = QString("<b>Current Settings:</b><br/>"
+                              "Codec: H.265 (HEVC)<br/>"
+                              "Quality: CRF %1<br/>"
+                              "CPU Speed: %2<br/>"
+                              "De-bob: %3 | Downscale: %4<br/>"
+                              "Concurrency: %5 encodes in parallel")
+                      .arg(QString::number(m_crf),
+                           m_preset,
+                           m_debob ? "ON" : "OFF",
+                           m_downscale ? "ON" : "OFF",
+                           QString::number(m_concurrentLimit));
+    if (m_lblConfigSummary) {
+        m_lblConfigSummary->setText(summary);
+    }
 }
 
 // Verifies if dependencies are present on the host environment
@@ -545,7 +509,7 @@ void MainWindow::selectDirectory()
     if (dirSelected.isEmpty()) return;
 
     m_rootDir = QDir(dirSelected).absolutePath();
-    m_dirInput->setText(m_rootDir);
+    m_rootDir = QDir(dirSelected).absolutePath();
 
     // Release old database managers
     delete m_dbManager;
@@ -580,7 +544,6 @@ void MainWindow::selectDirectory()
             .arg(e.what())
         );
         m_rootDir = "";
-        m_dirInput->setText("");
         m_btnScan->setEnabled(false);
         m_btnResetDb->setEnabled(false);
         m_btnResetScoreboard->setEnabled(false);
@@ -762,14 +725,22 @@ void MainWindow::startProcessing()
 {
     if (m_activeTranscodeQueue.isEmpty() || m_rootDir.isEmpty()) return;
 
-    // Lock configuration UI widgets during queue execution
-    m_btnBrowse->setEnabled(false);
+    // Lock configuration UI menus during queue execution (keep parent menus enabled, lock individual items)
+    m_actOpen->setEnabled(false);
+    m_actScan->setEnabled(false);
+    m_actExit->setEnabled(false);
+    m_actCrf->setEnabled(false);
+    m_menuPreset->setEnabled(false);
+    m_actDownscale->setEnabled(false);
+    m_actDebob->setEnabled(false);
+    m_actResetConfig->setEnabled(false);
     m_btnScan->setEnabled(false);
     m_btnStart->setEnabled(false);
     m_btnStop->setEnabled(true);
     m_isQueueRunning = true;
 
     m_pendingQueue = m_activeTranscodeQueue;
+    m_latestFileTimestamps.clear();
 
     logMessage(QString("Starting transcode queue with %1 files...").arg(m_pendingQueue.count()));
 
@@ -782,7 +753,7 @@ void MainWindow::startProcessing()
     }
 
     // Spawn initial worker slots up to concurrent setting limit
-    int maxConcurrent = m_spinConcurrent->value();
+    int maxConcurrent = m_concurrentLimit;
     for (int i = 0; i < maxConcurrent; ++i) {
         startNextQueueJob();
     }
@@ -799,16 +770,16 @@ void MainWindow::startNextQueueJob()
 
     // Populate transcode parameters mapping
     QVariantMap settings;
-    settings["crf"] = m_spinCrf->value();
-    settings["preset"] = m_comboPreset->currentText();
-    settings["downscale"] = m_chkDownscale->isChecked();
-    settings["debob"] = m_chkDebob->isChecked();
-    settings["live_preview"] = m_chkPreview->isChecked();
+    settings["crf"] = m_crf;
+    settings["preset"] = m_preset;
+    settings["downscale"] = m_downscale;
+    settings["debob"] = m_debob;
+    settings["live_preview"] = m_livePreviewEnabled;
 
     // Recalculate CPU threads split dynamically.
     // Splits cores evenly between concurrent encodes to avoid context switching.
     int totalCores = QThread::idealThreadCount();
-    int maxConcurrent = m_spinConcurrent->value();
+    int maxConcurrent = m_concurrentLimit;
     int threadsPerJob = qMax(1, totalCores / maxConcurrent);
     settings["threads"] = threadsPerJob;
 
@@ -827,7 +798,6 @@ void MainWindow::startNextQueueJob()
 
     // Add progress monitor card
     TranscodeMonitorCard *card = new TranscodeMonitorCard(filepath, m_monitorsContainer);
-    card->setPreviewVisible(m_chkPreview->isChecked());
     m_monitorsLayout->addWidget(card);
     m_activeCards.insert(filepath, card);
 
@@ -865,7 +835,7 @@ void MainWindow::onWorkerFinished()
 
     // Schedule next file in queue if slots are available
     if (m_isQueueRunning && !m_pendingQueue.isEmpty()) {
-        if (m_workers.count() < m_spinConcurrent->value()) {
+        if (m_workers.count() < m_concurrentLimit) {
             startNextQueueJob();
         }
     } else if (m_pendingQueue.isEmpty() && m_workers.isEmpty()) {
@@ -893,8 +863,10 @@ void MainWindow::onConcurrentChanged(int val)
 // Receives preview extraction requests from worker threads and routes them to corresponding cards
 void MainWindow::onWorkerPreviewFrameRequested(const QString &filepath, double secs)
 {
-    if (m_activeCards.contains(filepath)) {
-        m_activeCards[filepath]->requestFramePreview(secs);
+    m_latestFileTimestamps[filepath] = secs;
+
+    if (m_livePreviewEnabled && m_viewfinderFocusedFile == filepath) {
+        updateViewfinderFrame(filepath, secs);
     }
 }
 
@@ -908,6 +880,7 @@ void MainWindow::stopProcessing()
 
     // Tell all running worker threads to abort their background loops
     for (TranscodeWorker *worker : m_workers) {
+        worker->disconnect(this); // Disconnect signals going to MainWindow
         worker->stop();
     }
 
@@ -930,18 +903,47 @@ void MainWindow::stopProcessing()
     // Re-insert layout stretches
     m_monitorsLayout->addStretch();
 
+    // Clear viewfinder
+    m_viewfinderFocusedFile = "";
+    m_lblViewfinderStatus->setText("Now Viewing: Standby");
+    m_lblViewfinderTime->setText("Current Time: N/A");
+    m_lblViewfinder->clear();
+    m_lblViewfinder->setText("Standby / Select active encode");
+    if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
+        m_viewfinderProcess->kill();
+        m_viewfinderProcess->waitForFinished();
+    }
+    m_viewfinderBuffer.clear();
+
     processingFinished(); // Unlock GUI control panels
 }
 
 // Restores user settings back to initial baseline presets
 void MainWindow::resetSettings()
 {
-    m_spinCrf->setValue(28);
-    m_comboPreset->setCurrentText("medium");
-    m_chkDownscale->setChecked(true);
-    m_chkDebob->setChecked(true);
-    m_chkPreview->setChecked(false);
-    logMessage("Configuration panel reset to default configurations.");
+    m_crf = 28;
+    m_preset = "medium";
+    m_downscale = true;
+    m_debob = true;
+    m_livePreviewEnabled = false;
+    m_concurrentLimit = 1;
+
+    // Update menu action states
+    m_actShowPreview->setChecked(false);
+    m_actDownscale->setChecked(true);
+    m_actDebob->setChecked(true);
+    m_viewfinderGroup->setVisible(false);
+
+    // Update preset check state
+    for (QAction *action : m_presetGroup->actions()) {
+        if (action->text() == "medium") {
+            action->setChecked(true);
+            break;
+        }
+    }
+
+    updateConfigSummaryText();
+    logMessage("Configuration settings reset to defaults.");
 }
 
 // Writes print statements to standard output.
@@ -955,9 +957,19 @@ void MainWindow::updateProgress(const QString &filepath, int percentage, double 
 {
     int idx = findRowByFilepath(filepath);
     if (idx != -1) {
-        // Format table progress cell details
+        // Format table progress cell details (e.g. "48% (1.5x | ETA 03:12)")
         QString statsStr = (etaStr != "N/A") ? QString(" (%1x | ETA %2)").arg(QString::number(speed, 'f', 1), etaStr) : "";
         m_tableQueue->setItem(idx, 4, new QTableWidgetItem(QString("%1%%2").arg(QString::number(percentage), statsStr)));
+
+        // Update the "Compressed Size" column dynamically while transcoding is running.
+        // Once 3% or more is processed, we display "Current Size / ~Estimated Size" (formatted to 1 decimal place).
+        if (percentage >= 3) {
+            m_tableQueue->setItem(idx, 3, new QTableWidgetItem(QString("%1 MB / ~%2 MB")
+                .arg(QString::number(outSizeMb, 'f', 1), QString::number(projectedSizeMb, 'f', 1))));
+        } else {
+            m_tableQueue->setItem(idx, 3, new QTableWidgetItem(QString("%1 MB")
+                .arg(QString::number(outSizeMb, 'f', 1))));
+        }
     }
 
     // Route message data to corresponding active card
@@ -982,6 +994,10 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
                     item->setBackground(Qt::darkBlue);
                     item->setForeground(Qt::white);
                 }
+            }
+            // Automatically select this row if nothing is currently selected or focused in the viewfinder
+            if (m_livePreviewEnabled && m_viewfinderFocusedFile.isEmpty()) {
+                autoSelectActiveRow();
             }
         }
     }
@@ -1024,6 +1040,11 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
         }
 
         updateSavingsDashboard();
+
+        // If the finished file was the one focused in the viewfinder, shift focus to another active transcode
+        if (m_livePreviewEnabled && m_viewfinderFocusedFile == filepath) {
+            autoSelectActiveRow();
+        }
     }
 }
 
@@ -1031,7 +1052,15 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
 void MainWindow::processingFinished()
 {
     logMessage("\nAll transcode queue tasks finished.");
-    m_btnBrowse->setEnabled(true); // Unlock folder browse
+    // Enable menu actions again (keep parent menus enabled, unlock individual items)
+    m_actOpen->setEnabled(true);
+    m_actScan->setEnabled(true);
+    m_actExit->setEnabled(true);
+    m_actCrf->setEnabled(true);
+    m_menuPreset->setEnabled(true);
+    m_actDownscale->setEnabled(true);
+    m_actDebob->setEnabled(true);
+    m_actResetConfig->setEnabled(true);
     m_btnScan->setEnabled(true); // Unlock scan
     updateStartButtonState(); // Enable start button if pending items remain
     m_btnStop->setEnabled(false); // Lock abort
@@ -1086,17 +1115,6 @@ int MainWindow::findRowByFilepath(const QString &filepath)
         }
     }
     return -1; // Not found
-}
-
-// Propagates preview checkbox state shifts dynamically to active threads and UI cards.
-void MainWindow::togglePreview(bool checked)
-{
-    for (TranscodeWorker *worker : m_workers) {
-        worker->setLivePreviewEnabled(checked);
-    }
-    for (TranscodeMonitorCard *card : m_activeCards.values()) {
-        card->setPreviewVisible(checked);
-    }
 }
 
 // Slot triggered when clicking "Reset Database". Clears compliance cache.
@@ -1169,4 +1187,322 @@ void MainWindow::showTableContextMenu(const QPoint &pos)
         // Opens the video asynchronously using the host OS's default media player
         QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
     }
+}
+
+// -------------------------------------------------------------
+// Menu Slot Implementations
+// -------------------------------------------------------------
+
+void MainWindow::onScanSelected()
+{
+    scanDirectory();
+}
+
+// Called when the user clicks "Exit" in the File menu.
+// This slot triggers the main window to close, shutting down the app.
+void MainWindow::onExitSelected()
+{
+    close(); // Close the application window
+}
+
+// Called when the user toggles "Show Live Preview" in the View menu.
+// Enables or disables visual thumbnail seeking to conserve computer resources.
+void MainWindow::onTogglePreviewSelected(bool checked)
+{
+    m_livePreviewEnabled = checked; // Store the toggle state
+    m_viewfinderGroup->setVisible(checked); // Show or hide the viewfinder widget box in the sidebar
+
+    // Propagate the new preview status to all actively running background compression threads
+    for (TranscodeWorker *worker : m_workers) {
+        worker->setLivePreviewEnabled(checked);
+    }
+    
+    // If the user turned off live previews, reset the viewfinder layout back to its idle standby state
+    if (!checked) {
+        m_viewfinderFocusedFile = ""; // Forget whichever file was being inspected
+        m_lblViewfinderStatus->setText("Now Viewing: Standby");
+        m_lblViewfinderTime->setText("Current Time: N/A");
+        m_lblViewfinder->clear(); // Clear out the last rendered picture frame
+        m_lblViewfinder->setText("Standby / Select active encode");
+        
+        // Terminate any ongoing background ffmpeg process that was extracting a preview frame
+        if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
+            m_viewfinderProcess->kill();
+            m_viewfinderProcess->waitForFinished();
+        }
+        m_viewfinderBuffer.clear(); // Clear the image data buffer
+    } else {
+        // If turned on, check if the user already selected a row. If not, auto-select the first active transcode row.
+        if (m_tableQueue->selectedItems().isEmpty()) {
+            autoSelectActiveRow();
+        } else {
+            onQueueTableSelectionChanged();
+        }
+    }
+}
+
+// Called when the user clicks "Transcode Quality (CRF)..." in the Options menu.
+// Displays a popup dialog prompting the user to type or slide to a quality number.
+void MainWindow::onCrfSelected()
+{
+    bool ok;
+    // Open a native input window with a spinbox (0-51 range, default is current m_crf)
+    int val = QInputDialog::getInt(this, "Set CRF Quality",
+                                   "CRF value (0-51, higher = smaller size):",
+                                   m_crf, 0, 51, 1, &ok);
+    if (ok) {
+        m_crf = val; // Store the new quality setting
+        updateConfigSummaryText(); // Update the sidebar summary text label
+        logMessage(QString("Transcode CRF quality set to: %1").arg(m_crf));
+    }
+}
+
+// Called when the user selects a preset speed option from the "Speed Preset" submenu.
+// Triggers whenever any speed preset menu option changes.
+void MainWindow::onPresetSelected(QAction *action)
+{
+    if (action) {
+        m_preset = action->text(); // Extract the speed text (e.g., "fast", "slow") from the menu item
+        updateConfigSummaryText(); // Redraw the sidebar config text label
+        logMessage(QString("CPU speed preset set to: %1").arg(m_preset));
+    }
+}
+
+// Called when the user clicks "Max Concurrent Encodes..." in the Options menu.
+// Spawns a numeric input pop-up to limit parallel transcode processes.
+void MainWindow::onConcurrencySelected()
+{
+    bool ok;
+    // Prompt the user for an integer number of parallel jobs (range 1-16)
+    int val = QInputDialog::getInt(this, "Set Concurrency",
+                                   "Max concurrent transcode processes:",
+                                   m_concurrentLimit, 1, 16, 1, &ok);
+    if (ok) {
+        m_concurrentLimit = val; // Update the concurrent limit value
+        updateConfigSummaryText(); // Redraw the sidebar config text label
+        onConcurrentChanged(m_concurrentLimit); // Adjust slots on the fly if queue is currently active
+        logMessage(QString("Max concurrent slots set to: %1").arg(m_concurrentLimit));
+    }
+}
+
+// Called when the user toggles "Downscale 4K/UHD to 1080p" in the Options menu.
+void MainWindow::onDownscaleToggled(bool checked)
+{
+    m_downscale = checked; // Store checked status
+    updateConfigSummaryText(); // Redraw the sidebar config text label
+    logMessage(QString("Downscale 4K to 1080p set to: %1").arg(m_downscale ? "ON" : "OFF"));
+}
+
+// Called when the user toggles "High frame-rate de-bob (bwdif)" in the Options menu.
+void MainWindow::onDebobToggled(bool checked)
+{
+    m_debob = checked; // Store checked status
+    updateConfigSummaryText(); // Redraw the sidebar config text label
+    logMessage(QString("High frame-rate de-bob set to: %1").arg(m_debob ? "ON" : "OFF"));
+}
+
+// Called when the user clicks "Restore settings to defaults" in the Options menu.
+void MainWindow::onResetConfigSelected()
+{
+    resetSettings(); // Restore configurations to initial baselines
+}
+
+// Called when the user clicks "Usage Guide" in the Help menu.
+// Shows a dialog explaining standard operational sequences.
+void MainWindow::onUsageGuideSelected()
+{
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle("HEVC Video Shrinker - Usage Guide");
+    msgBox.setTextFormat(Qt::RichText);
+    msgBox.setIcon(QMessageBox::Information);
+    msgBox.setText("<h3>Quick Start Guide</h3>"
+        "<p><b>1. Select Workspace:</b> Go to File &gt; Open Workspace Folder to choose a directory containing your video files.</p>"
+        "<p><b>2. Scan Workspace:</b> Click the 'Scan Directory' button (or File &gt; Scan Directory) to index all video files. The status list will color-code files that are already completed (green) or already compliant (yellow).</p>"
+        "<p><b>3. Adjust Configurations:</b> Open the 'Options' menu to set target CRF quality, CPU speed preset, UHD downscaling, deinterlace bobbing, or max concurrent slots.</p>"
+        "<p><b>4. Start Queue:</b> Click 'Start Queue' in the sidebar to begin shrinking videos. Active progress indicators will stack vertically.</p>"
+        "<p><b>5. Live Previews:</b> Enable View &gt; Show Live Preview. Select any actively-transcoding row in the table to display its live frame monitor in the sidebar viewfinder.</p>");
+    msgBox.exec();
+}
+
+// Called when the user clicks "About HEVC Video Shrinker" in the Help menu.
+// Shows information about application libraries, authors, and system dependencies.
+void MainWindow::onAboutSelected()
+{
+    QString ffmpeg = findDependency("ffmpeg"); // Search host path for FFmpeg binary
+    QString ffprobe = findDependency("ffprobe"); // Search host path for FFprobe binary
+    
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle("About HEVC Video Shrinker");
+    msgBox.setTextFormat(Qt::RichText);
+    msgBox.setIcon(QMessageBox::Information);
+    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0</h3>"
+                           "<p>A multi-process, GPU-friendly video compressor interface written in C++ and Qt6.</p>"
+                           "<p><b>Dependencies Status:</b><br/>"
+                           "• FFmpeg: %1<br/>"
+                           "• FFprobe: %2</p>"
+                           "<p>Released under the open-source GPLv3 license.</p>")
+                   .arg(ffmpeg.isEmpty() ? QString("<font color='red'>Missing</font>") : QString("<font color='green'>Detected</font>"),
+                        ffprobe.isEmpty() ? QString("<font color='red'>Missing</font>") : QString("<font color='green'>Detected</font>")));
+    msgBox.exec();
+}
+
+// -------------------------------------------------------------
+// Live Viewfinder Logic Implementations
+// -------------------------------------------------------------
+
+// Triggered when FFmpeg outputs picture data chunks to its standard output stream.
+// Appends received image bytes to a buffer memory chunk.
+void MainWindow::onViewfinderDataAvailable()
+{
+    if (m_viewfinderProcess) {
+        m_viewfinderBuffer.append(m_viewfinderProcess->readAllStandardOutput());
+    }
+}
+
+// Callback slot triggered when the viewfinder's FFmpeg subprocess finishes seeking.
+// Parses the PNG data buffer and updates the pixel screen inside the sidebar.
+void MainWindow::onViewfinderProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    // Make sure process exited normally without crash errors
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        if (m_viewfinderProcess) {
+            // Read any leftover trailing bytes from stdout
+            m_viewfinderBuffer.append(m_viewfinderProcess->readAllStandardOutput());
+        }
+        if (!m_viewfinderBuffer.isEmpty()) {
+            QPixmap pixmap;
+            // Load the image binary buffer as a PNG
+            if (pixmap.loadFromData(m_viewfinderBuffer, "PNG")) {
+                // Resize pixmap to fit the label viewport while maintaining aspect ratios (prevents stretching)
+                QPixmap scaledPixmap = pixmap.scaled(m_lblViewfinder->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                m_lblViewfinder->setPixmap(scaledPixmap); // Render the picture
+            }
+        }
+    }
+    m_viewfinderBuffer.clear(); // Empty buffer for the next frame capture
+}
+
+// Slot triggered when the user highlights a different video row in the main queue list.
+// Determines if the newly selected row is actively encoding, focusing the viewfinder if it is.
+void MainWindow::onQueueTableSelectionChanged()
+{
+    // Fetch currently highlighted rows in the spreadsheet list
+    QList<QTableWidgetItem*> selectedItems = m_tableQueue->selectedItems();
+    if (selectedItems.isEmpty()) {
+        m_viewfinderFocusedFile = ""; // Deselect
+        m_lblViewfinderStatus->setText("Now Viewing: Standby");
+        m_lblViewfinderTime->setText("Current Time: N/A");
+        m_lblViewfinder->clear();
+        m_lblViewfinder->setText("Standby / Select active encode");
+        return;
+    }
+
+    // Identify which row was selected and fetch its filename and status text
+    int row = selectedItems.first()->row();
+    QTableWidgetItem *pathItem = m_tableQueue->item(row, 5); // Index 5 holds the relative file path
+    QTableWidgetItem *statusItem = m_tableQueue->item(row, 1); // Index 1 holds the status text
+    if (!pathItem || !statusItem) return;
+
+    QString filepath = QDir(m_rootDir).filePath(pathItem->text()); // Build the absolute filepath
+    QString status = statusItem->text();
+
+    // If the highlighted video file is actively processing, point the viewfinder focus at it
+    if (status == "Processing" && m_activeCards.contains(filepath)) {
+        m_viewfinderFocusedFile = filepath;
+        m_lblViewfinderStatus->setText(QString("Now Viewing: %1").arg(QFileInfo(filepath).fileName()));
+        
+        // If we have a cached timestamp for this transcode job, request its preview frame immediately
+        if (m_latestFileTimestamps.contains(filepath)) {
+            updateViewfinderFrame(filepath, m_latestFileTimestamps[filepath]);
+        } else {
+            m_lblViewfinderTime->setText("Current Time: Seek starting...");
+            updateViewfinderFrame(filepath, 0.0); // Start preview extraction from beginning
+        }
+    } else {
+        // If the highlighted row is not actively processing, place viewfinder on standby
+        m_viewfinderFocusedFile = "";
+        m_lblViewfinderStatus->setText("Now Viewing: Standby");
+        m_lblViewfinderTime->setText("Current Time: N/A");
+        m_lblViewfinder->clear();
+        m_lblViewfinder->setText("Standby / Select active encode");
+    }
+}
+
+// Dispatches a seek execution command running FFmpeg asynchronously to pull one frame.
+// Lays out the letterbox/pillarbox frame dynamically to match wide/tall aspect ratios.
+void MainWindow::updateViewfinderFrame(const QString &filepath, double secs)
+{
+    if (!m_livePreviewEnabled) return; // Skip if live previews are disabled
+
+    // Ignore request if the viewfinder's FFmpeg process is currently busy seeking the last frame
+    if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
+        return;
+    }
+
+    QString ffmpeg = findDependency("ffmpeg");
+    if (ffmpeg.isEmpty()) return; // Abort if FFmpeg dependency is missing
+
+    m_viewfinderBuffer.clear(); // Empty the previous image buffer
+
+    // Format seconds value into HH:MM:SS.ms format required by FFmpeg seek parameter
+    int h = static_cast<int>(secs / 3600);
+    int m = static_cast<int>((secs - h * 3600) / 60);
+    int s = static_cast<int>(secs - h * 3600 - m * 60);
+    int ms = static_cast<int>((secs - h * 3600 - m * 60 - s) * 1000);
+    QString timeStr = QString("%1:%2:%3.%4")
+                      .arg(h, 2, 10, QChar('0'))
+                      .arg(m, 2, 10, QChar('0'))
+                      .arg(s, 2, 10, QChar('0'))
+                      .arg(ms, 3, 10, QChar('0'));
+
+    // Update time status label text
+    m_lblViewfinderTime->setText(QString("Current Time: %1:%2:%3")
+                                 .arg(h, 2, 10, QChar('0'))
+                                 .arg(m, 2, 10, QChar('0'))
+                                 .arg(s, 2, 10, QChar('0')));
+
+    // Dispatch FFmpeg subprocess to extract exactly 1 frame at the target time
+    // Scales picture width to 240px and keeps aspect ratios. Pipes binary PNG output to stdout.
+    m_viewfinderProcess->start(ffmpeg, {
+        "-y",
+        "-ss", timeStr,
+        "-i", filepath,
+        "-vf", "scale=240:-1",
+        "-frames:v", "1",
+        "-f", "image2pipe",
+        "-vcodec", "png",
+        "-"
+    });
+}
+
+// Searches for the first active (processing) row in the grid table.
+// If found, selects that row to focus the viewfinder preview on it.
+void MainWindow::autoSelectActiveRow()
+{
+    // If live progress previews are disabled, we do not need to manage selection focus
+    if (!m_livePreviewEnabled) return;
+
+    // Check if the current focused file is still active/processing.
+    // If it is, keep focusing on it to avoid jumping selection.
+    if (!m_viewfinderFocusedFile.isEmpty()) {
+        int focusedIdx = findRowByFilepath(m_viewfinderFocusedFile);
+        if (focusedIdx != -1) {
+            QTableWidgetItem *statusItem = m_tableQueue->item(focusedIdx, 1);
+            if (statusItem && statusItem->text() == "Processing") {
+                return; // Keep focus on the active transcode
+            }
+        }
+    }
+
+    // Traverse the spreadsheet grid to find the first active encoding task
+    for (int row = 0; row < m_tableQueue->rowCount(); ++row) {
+        QTableWidgetItem *statusItem = m_tableQueue->item(row, 1);
+        if (statusItem && statusItem->text() == "Processing") {
+            m_tableQueue->selectRow(row); // Select the active row
+            return;
+        }
+    }
+
+    // If no active transcode is found, clear selection (viewfinder returns to standby)
+    m_tableQueue->clearSelection();
 }

@@ -16,6 +16,7 @@
 #include <QStringList> // Resizable list of string elements
 #include <QProcess> // Runs background executables (thumbnail seekers)
 #include <QHBoxLayout> // Horizontal layout manager aligning widgets left-to-right
+#include <QFrame> // Frame container layout helper
 #include "databasemanager.h" // Database wrapper header
 #include "transcodeworker.h" // Background thread header
 
@@ -31,13 +32,13 @@ struct ScannedFile {
 // UI Widget representing an active progress display card at the bottom.
 // Spawns dynamically for each concurrent transcode thread, hosting its own progress bar,
 // statistics panel, and live thumbnail preview picture.
-class TranscodeMonitorCard : public QGroupBox {
+class TranscodeMonitorCard : public QFrame {
     Q_OBJECT
 public:
-    // Constructor. Creates widgets, layouts, and preview timers for the given file.
+    // Constructor. Creates widgets and layouts for the given file.
     TranscodeMonitorCard(const QString &filepath, QWidget *parent = nullptr);
     
-    // Destructor. Stops active thumbnail seekers.
+    // Destructor.
     ~TranscodeMonitorCard();
 
     // Updates text strings and percentages inside the card during transcoding.
@@ -45,19 +46,6 @@ public:
     
     // Updates status messages (e.g., "Analyzing...", "Completed").
     void updateStatus(const QString &status, const QString &details);
-    
-    // Triggers an asynchronous seeking request to extract a frame thumbnail at a given second.
-    void requestFramePreview(double secs);
-    
-    // Hides/shows the preview thumbnail and resizes the card's width dynamically.
-    void setPreviewVisible(bool visible);
-
-private slots:
-    // Receives image byte chunks extracted by FFmpeg.
-    void onPreviewDataAvailable();
-    
-    // Callback when thumbnail extraction finishes. Renders pixmap image onto label.
-    void onPreviewProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
     QString m_filepath;              // Absolute path to the video file monitored by this card
@@ -66,10 +54,6 @@ private:
     QLabel *m_lblTime;              // Stats label showing ETA and elapsed time
     QLabel *m_lblSize;              // Stats label showing current and projected file sizes
     QProgressBar *m_progressBar;    // Progress bar widget
-    QLabel *m_lblPreview;           // Square label containing the live video preview frame
-
-    QProcess *m_previewProcess;     // Background process runner extracting thumbnail frames
-    QByteArray m_previewBuffer;     // Memory buffer loading image byte chunks
     qint64 m_startTime;             // Millisecond timestamp when transcode began
 };
 
@@ -85,80 +69,98 @@ public:
     ~MainWindow();
 
 private slots:
-    // Triggered by "Browse" button. Displays directory choice dialog.
+    // File menu slots
     void selectDirectory();
+    void onScanSelected();
+    void onExitSelected();
+
+    // View menu slots
+    void onTogglePreviewSelected(bool checked);
+
+    // Options menu slots
+    void onCrfSelected();
+    void onPresetSelected(QAction *action);
+    void onConcurrencySelected();
+    void onDownscaleToggled(bool checked);
+    void onDebobToggled(bool checked);
+    void onResetConfigSelected();
     
-    // Triggered by "Scan" button. Iterates folder, updates database compliance cache, builds queue.
+    // Help menu slots
+    void onUsageGuideSelected();
+    void onAboutSelected();
+
+    // General slots
     void scanDirectory();
-    
-    // Triggered by "Start Queue" button. Locks UI controls, dispatches transcode jobs.
     void startProcessing();
-    
-    // Triggered by "Abort Job" button. Terminates active processes and stops queue dispatching.
     void stopProcessing();
-    
-    // Restores settings back to default values.
     void resetSettings();
-    
-    // Purges cache database scan records.
     void onResetDbClicked();
-    
-    // Purges sizing stats history (resetting scoreboard back to 0).
     void onResetScoreboardClicked();
     
-    // Appends message strings to the log terminal text console.
     void logMessage(const QString &message);
-    
-    // Routes progress status updates from background threads to corresponding monitor cards.
     void updateProgress(const QString &filepath, int percentage, double fps, double speed, const QString &etaStr, double outSizeMb, double projectedSizeMb);
-    
-    // Routes status text updates to corresponding monitor cards.
     void updateStatus(const QString &filepath, const QString &status, const QString &details);
-    
-    // Called when a worker finishes transcoding. Handles database recordings and grid table color codes.
     void fileDone(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize);
-    
-    // Cleans layouts and unlocks GUI controls when all queue items finish.
     void processingFinished();
     
-    // Spawns a background worker thread for the next pending video file in the queue.
     void startNextQueueJob();
-    
-    // Cleans up worker thread handles and updates active queue slots.
     void onWorkerFinished();
-    
-    // Dispatches frame seek extraction commands when worker threads request preview updates.
     void onWorkerPreviewFrameRequested(const QString &filepath, double secs);
-    
-    // Dynamically collapses or expands preview modules inside active cards when checked.
-    void togglePreview(bool checked);
-    
-    // Adjusts worker slots on the fly when concurrent setting values change mid-queue.
     void onConcurrentChanged(int val);
-    
-    // Displays a right-click context menu containing a "Play Video" option.
     void showTableContextMenu(const QPoint &pos);
 
+    // Viewfinder slots
+    void onViewfinderDataAvailable();
+    void onViewfinderProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onQueueTableSelectionChanged();
+
 private:
+    // Menu elements
+    QMenuBar *m_menuBar;
+    QMenu *m_menuFile;
+    QMenu *m_menuView;
+    QMenu *m_menuOptions;
+    QMenu *m_menuHelp;
+
+    QAction *m_actShowPreview;
+    QAction *m_actDownscale;
+    QAction *m_actDebob;
+    QActionGroup *m_presetGroup;
+
+    // File Menu Actions
+    QAction *m_actOpen;
+    QAction *m_actScan;
+    QAction *m_actExit;
+
+    // Options Menu Actions
+    QAction *m_actCrf;
+    QMenu *m_menuPreset;
+    QAction *m_actConcurrency;
+    QAction *m_actResetConfig;
+
     // GUI Controls
-    QLineEdit *m_dirInput;           // Folder path entry field
-    QPushButton *m_btnBrowse;        // Directory lookup button
     QPushButton *m_btnScan;          // Catalog cataloging button
     QPushButton *m_btnStart;         // Start processing queue button
     QPushButton *m_btnStop;          // Cancellation/abort button
-    QPushButton *m_btnReset;         // Reset configuration settings button
     QPushButton *m_btnResetDb;       // Wipe scan database cache button
     QPushButton *m_btnResetScoreboard;// Wipe sizing scoreboard stats button
 
-    QSpinBox *m_spinCrf;             // CRF encoder quality setting (0-51)
-    QComboBox *m_comboPreset;        // Speed preset selector (ultrafast-veryslow)
-    QCheckBox *m_chkDownscale;       // Downscaling checkbox (UHD to 1080p)
-    QCheckBox *m_chkDebob;           // Deinterlacing frame-rate bob checkbox
-    QCheckBox *m_chkPreview;         // Enable live thumbnail preview checkbox
-    QSpinBox *m_spinConcurrent;      // Max concurrent encodes selector (1-16)
-
     QLabel *m_lblFfmpegStatus;       // FFmpeg status check indicator
     QLabel *m_lblFfprobeStatus;      // FFprobe status check indicator
+
+    // Config details summary label
+    QLabel *m_lblConfigSummary;
+
+    // Viewfinder components
+    QGroupBox *m_viewfinderGroup;
+    QLabel *m_lblViewfinder;
+    QLabel *m_lblViewfinderStatus;
+    QLabel *m_lblViewfinderTime;
+
+    QProcess *m_viewfinderProcess;
+    QByteArray m_viewfinderBuffer;
+    QString m_viewfinderFocusedFile;
+    QHash<QString, double> m_latestFileTimestamps; // Cache last timestamp of active files for previewing
 
     QLabel *m_lblDashboardOrig;      // Statistics: Original size saved text
     QLabel *m_lblDashboardComp;      // Statistics: Compressed size saved text
@@ -169,7 +171,15 @@ private:
 
     // Scrollable bottom layout hosting dynamic worker monitor cards
     QWidget *m_monitorsContainer;
-    QHBoxLayout *m_monitorsLayout;
+    QVBoxLayout *m_monitorsLayout;
+
+    // Settings config values in memory
+    int m_crf;
+    QString m_preset;
+    bool m_downscale;
+    bool m_debob;
+    bool m_livePreviewEnabled;
+    int m_concurrentLimit;
 
     // Execution state and logic containers
     QString m_rootDir;                       // Absolute path to target scanned folder
@@ -183,6 +193,8 @@ private:
 
     // GUI Layout setup
     void initUi();
+    void updateConfigSummaryText();
+    void updateViewfinderFrame(const QString &filepath, double secs);
     
     // Verifies if FFmpeg and FFprobe binaries are available on the host system.
     void checkDependencies();
@@ -195,6 +207,9 @@ private:
     
     // Controls enabling state of start queue button based on scan state.
     void updateStartButtonState();
+    
+    // Automatically selects the first active (processing) row in the grid table for viewfinder preview.
+    void autoSelectActiveRow();
 };
 
 #endif // MAINWINDOW_H

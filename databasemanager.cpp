@@ -3,6 +3,7 @@
 #include <QSqlError>
 #include <QVariant>
 #include <QFileInfo>
+#include <QFile>
 #include <QDir>
 #include <QThread>
 #include <QDebug>
@@ -26,6 +27,15 @@ DatabaseManager::DatabaseManager(const QString &dbPath)
     Q_UNUSED(dbPath); // Suppress compiler warnings for unused parameter
     m_dbPath = getGlobalDbPath(); // Locate the global database storage file
     
+#ifndef Q_OS_WIN
+    // Automatically migrate old, malformed Linux database file (file:<path>?nolock=1) to the clean path
+    QString oldLinuxDbPath = QString("file:%1?nolock=1").arg(m_dbPath);
+    if (QFile::exists(oldLinuxDbPath) && !QFile::exists(m_dbPath)) {
+        QFile::rename(oldLinuxDbPath, m_dbPath);
+        qDebug() << "Migrated legacy Linux database filename to standard path:" << m_dbPath;
+    }
+#endif
+
     // Generate a unique database connection identifier per-thread (e.g., "conn_140239012").
     // SQLite requires separate connection handles per thread to prevent cross-thread corruption/race conditions.
     m_connectionName = QString("conn_%1").arg(QString::number((quintptr)QThread::currentThreadId()));
@@ -71,14 +81,22 @@ QSqlDatabase DatabaseManager::db()
     // Otherwise, register a new SQLite connection handle
     QSqlDatabase newDb = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
     
-    // Format the database connection as a standard SQLite URI with locks disabled (`nolock=1`).
-    // Replacing backslashes with forward slashes is required by the SQLite URI parser.
+#ifdef Q_OS_WIN
+    // On Windows, native locking handles network mounts cleanly.
+    // Use the raw absolute path directly without URI prefix.
+    newDb.setDatabaseName(m_dbPath);
+#else
+    // On Linux/Unix, set the connection option to parse URIs.
     // Setting `nolock=1` bypasses SQLite's OS file-locking syscalls (lockf/LockFileEx),
     // which prevents "database is locked" errors when the database runs on network CIFS/SMB mounts.
+    newDb.setConnectOptions("QSQLITE_OPEN_URI_ARGUMENTS");
+    
     QString uriPath = m_dbPath;
     uriPath.replace("\\", "/");
-    QString uriDbPath = QString("file:%1?nolock=1").arg(uriPath);
+    // Prefix with file:// for standard absolute path URI resolution
+    QString uriDbPath = QString("file://%1?nolock=1").arg(uriPath);
     newDb.setDatabaseName(uriDbPath);
+#endif
     
     if (!newDb.open()) {
         qWarning() << "Failed to open database:" << newDb.lastError().text();
@@ -350,6 +368,13 @@ void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QSt
             QSqlDatabase mainDb = db(); // Fetch global database connection
             if (mainDb.isOpen()) {
                 QSqlQuery insertQuery(mainDb);
+                // Prepare the query once outside the loop to optimize performance
+                insertQuery.prepare(
+                    "INSERT OR IGNORE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
+                    "VALUES (:filepath, :original_size, :compressed_size, :hash, :processed_at)"
+                );
+                
+                mainDb.transaction(); // Start single batch transaction for fast network share imports
                 while (query.next()) {
                     QString oldPath = query.value(0).toString();
                     qint64 origSize = query.value(1).toLongLong();
@@ -367,11 +392,6 @@ void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QSt
                     absPath = QDir::cleanPath(absPath);
                     absPath.replace("\\", "/");
                     
-                    // Insert the record into the global database. Ignore duplicates.
-                    insertQuery.prepare(
-                        "INSERT OR IGNORE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
-                        "VALUES (:filepath, :original_size, :compressed_size, :hash, :processed_at)"
-                    );
                     insertQuery.bindValue(":filepath", absPath);
                     insertQuery.bindValue(":original_size", origSize);
                     insertQuery.bindValue(":compressed_size", compSize);
@@ -379,6 +399,7 @@ void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QSt
                     insertQuery.bindValue(":processed_at", processedAt);
                     insertQuery.exec();
                 }
+                mainDb.commit(); // Commit all rows in one operation
             }
         }
         localDb.close(); // Close local file handle
