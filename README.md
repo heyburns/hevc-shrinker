@@ -1,5 +1,7 @@
 # HEVC Video Shrinker
 
+![HEVC Video Shrinker Screen Shot](screenshot.png)
+
 This is a desktop app version of the older bash script that used to live in this repo. If you've arrived here looking for the script, it's gone, replaced by this app.
 
 This is a cross-platform application that has one, and only one, function: to help you intelligently clean up and shrink large video libraries. If you have a large collection of movies or TV recordings taking up hundreds of gigabytes on your hard drive, this tool will batch-convert your collection into highly efficient H.265 (HEVC) videos in an MKV container, reducing file size while keeping the visual quality intact. While it aims for visual parity, transcoding is always lossy and this app prioritizes file size over quality. It should never be used on collections where quality is the paramount concern, e.g. archival material, or material that needs specialized treatment.
@@ -69,8 +71,22 @@ cmake --build build
 ```
 Once compiled, you can launch the application with `./build/hevc_shrinker`.
 
+### macOS
+
+If you want to compile the project on macOS:
+1. Install compiler tools, CMake, and Qt6 (e.g. via Homebrew):
+   ```bash
+   brew install cmake qt
+   ```
+2. Build the project using CMake:
+   ```bash
+   cmake -B build -S .
+   cmake --build build --config Release
+   ```
+On macOS, this will generate a native App Bundle `hevc_shrinker.app` inside the `build` directory.
+
 ### macOS Compatibility Note
-While the code is written in cross-platform C++ and Qt6 and should theoretically build and run on macOS, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality, package app bundles, or troubleshoot macOS-specific path/dependency issues. You're on your own.
+While the code is written in cross-platform C++ and Qt6 and includes macOS compatibility enhancements, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality or troubleshoot macOS-specific path/dependency issues. You're on your own.
 
 ## Packaging and distribution
 
@@ -84,7 +100,7 @@ If you want to run the app from a thumb drive or share it easily without an inst
    ```powershell
    python package_portable.py
    ```
-This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_1.0_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
+This script will collect the compiled executable, the required Qt6 libraries, compiler runtimes, and the embedded icon into a ZIP archive located at dist/hevc_shrinker_portable_2.0_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
 
 #### Installer version
 I have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Opening setup.iss in Inno Setup and compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.
