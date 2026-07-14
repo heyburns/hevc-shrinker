@@ -358,51 +358,53 @@ void DatabaseManager::migrateLocalDatabase(const QString &localDbPath, const QSt
     
     // Open a temporary connection to the local database file
     QString localConnName = QString("local_conn_%1").arg(QString::number((quintptr)QThread::currentThreadId()));
-    QSqlDatabase localDb = QSqlDatabase::addDatabase("QSQLITE", localConnName);
-    localDb.setDatabaseName(localDbPath);
-    
-    if (localDb.open()) {
-        QSqlQuery query(localDb);
-        // Query all processed file rows from the local database
-        if (query.exec("SELECT filepath, original_size, compressed_size, hash, processed_at FROM processed_files")) {
-            QSqlDatabase mainDb = db(); // Fetch global database connection
-            if (mainDb.isOpen()) {
-                QSqlQuery insertQuery(mainDb);
-                // Prepare the query once outside the loop to optimize performance
-                insertQuery.prepare(
-                    "INSERT OR IGNORE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
-                    "VALUES (:filepath, :original_size, :compressed_size, :hash, :processed_at)"
-                );
-                
-                mainDb.transaction(); // Start single batch transaction for fast network share imports
-                while (query.next()) {
-                    QString oldPath = query.value(0).toString();
-                    qint64 origSize = query.value(1).toLongLong();
-                    qint64 compSize = query.value(2).toLongLong();
-                    QString hash = query.value(3).toString();
-                    QString processedAt = query.value(4).toString();
+    {
+        QSqlDatabase localDb = QSqlDatabase::addDatabase("QSQLITE", localConnName);
+        localDb.setDatabaseName(localDbPath);
+        
+        if (localDb.open()) {
+            QSqlQuery query(localDb);
+            // Query all processed file rows from the local database
+            if (query.exec("SELECT filepath, original_size, compressed_size, hash, processed_at FROM processed_files")) {
+                QSqlDatabase mainDb = db(); // Fetch global database connection
+                if (mainDb.isOpen()) {
+                    QSqlQuery insertQuery(mainDb);
+                    // Prepare the query once outside the loop to optimize performance
+                    insertQuery.prepare(
+                        "INSERT OR IGNORE INTO processed_files (filepath, original_size, compressed_size, hash, processed_at) "
+                        "VALUES (:filepath, :original_size, :compressed_size, :hash, :processed_at)"
+                    );
                     
-                    // Resolve paths to absolute paths.
-                    // If the path in the old database was saved as relative (e.g. "movies/file.mkv"),
-                    // prepend the workspace root directory to obtain the absolute path on the host.
-                    QString absPath = oldPath;
-                    if (QDir::isRelativePath(oldPath)) {
-                        absPath = QDir(rootDir).absoluteFilePath(oldPath);
+                    mainDb.transaction(); // Start single batch transaction for fast network share imports
+                    while (query.next()) {
+                        QString oldPath = query.value(0).toString();
+                        qint64 origSize = query.value(1).toLongLong();
+                        qint64 compSize = query.value(2).toLongLong();
+                        QString hash = query.value(3).toString();
+                        QString processedAt = query.value(4).toString();
+                        
+                        // Resolve paths to absolute paths.
+                        // If the path in the old database was saved as relative (e.g. "movies/file.mkv"),
+                        // prepend the workspace root directory to obtain the absolute path on the host.
+                        QString absPath = oldPath;
+                        if (QDir::isRelativePath(oldPath)) {
+                            absPath = QDir(rootDir).absoluteFilePath(oldPath);
+                        }
+                        absPath = QDir::cleanPath(absPath);
+                        absPath.replace("\\", "/");
+                        
+                        insertQuery.bindValue(":filepath", absPath);
+                        insertQuery.bindValue(":original_size", origSize);
+                        insertQuery.bindValue(":compressed_size", compSize);
+                        insertQuery.bindValue(":hash", hash);
+                        insertQuery.bindValue(":processed_at", processedAt);
+                        insertQuery.exec();
                     }
-                    absPath = QDir::cleanPath(absPath);
-                    absPath.replace("\\", "/");
-                    
-                    insertQuery.bindValue(":filepath", absPath);
-                    insertQuery.bindValue(":original_size", origSize);
-                    insertQuery.bindValue(":compressed_size", compSize);
-                    insertQuery.bindValue(":hash", hash);
-                    insertQuery.bindValue(":processed_at", processedAt);
-                    insertQuery.exec();
+                    mainDb.commit(); // Commit all rows in one operation
                 }
-                mainDb.commit(); // Commit all rows in one operation
             }
+            localDb.close(); // Close local file handle
         }
-        localDb.close(); // Close local file handle
     }
     QSqlDatabase::removeDatabase(localConnName); // Unregister temporary connection
     

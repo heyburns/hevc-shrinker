@@ -71,8 +71,22 @@ cmake --build build
 ```
 Once compiled, you can launch the application with `./build/hevc_shrinker`.
 
+### macOS
+
+If you want to compile the project on macOS:
+1. Install compiler tools, CMake, and Qt6 (e.g. via Homebrew):
+   ```bash
+   brew install cmake qt
+   ```
+2. Build the project using CMake:
+   ```bash
+   cmake -B build -S .
+   cmake --build build --config Release
+   ```
+On macOS, this will generate a native App Bundle `hevc_shrinker.app` inside the `build` directory.
+
 ### macOS Compatibility Note
-While the code is written in cross-platform C++ and Qt6 and should theoretically build and run on macOS, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality, package app bundles, or troubleshoot macOS-specific path/dependency issues. You're on your own.
+While the code is written in cross-platform C++ and Qt6 and includes macOS compatibility enhancements, it is **completely unsupported and untested** on Mac. The author does not own a Mac to verify functionality or troubleshoot macOS-specific path/dependency issues. You're on your own.
 
 ## Packaging and distribution
 

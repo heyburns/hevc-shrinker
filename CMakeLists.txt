@@ -18,6 +18,7 @@ add_executable(hevc_shrinker
     transcodeworker.cpp
     mainwindow.h
     mainwindow.cpp
+    resources.qrc
 )
 
 if(WIN32)
@@ -34,6 +35,13 @@ target_link_libraries(hevc_shrinker PRIVATE
 if(WIN32)
     set_target_properties(hevc_shrinker PROPERTIES
         WIN32_EXECUTABLE ON
+    )
+endif()
+
+# On macOS, build as a native App Bundle so it can receive GUI focus and show in the dock
+if(APPLE)
+    set_target_properties(hevc_shrinker PROPERTIES
+        MACOSX_BUNDLE ON
     )
 endif()
 
