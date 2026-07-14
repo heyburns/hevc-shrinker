@@ -1,0 +1,29 @@
+name: ThePornDB Movies
+sceneByFragment:
+  action: script
+  script:
+    - python3
+    - ThePornDBMovies.py
+    - fragment
+sceneByName:
+  action: script
+  script:
+    - python3
+    - ThePornDBMovies.py
+    - search
+sceneByQueryFragment:
+  action: script
+  script:
+    - python3
+    - ThePornDBMovies.py
+    - query
+sceneByURL:
+  - action: script
+    url:
+      - theporndb.net/movies/
+    script:
+      - python3
+      - ThePornDBMovies.py
+      - url
+
+

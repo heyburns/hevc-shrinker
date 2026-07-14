@@ -151,11 +151,8 @@ MainWindow::MainWindow(QWidget *parent)
     initUi(); // Build the window layouts and components
     checkDependencies(); // Verify if ffmpeg/ffprobe exist
 
-    // Set Window Icon from deployed application directory path if it exists
-    QString iconPath = QCoreApplication::applicationDirPath() + "/app_icon.png";
-    if (QFile::exists(iconPath)) {
-        setWindowIcon(QIcon(iconPath));
-    }
+    // Set Window Icon from compiled Qt resources
+    setWindowIcon(QIcon(":/app_icon.png"));
 }
 
 // Destructor: Safely stops and joins any active transcode threads on exit.
@@ -164,6 +161,7 @@ MainWindow::~MainWindow()
     for (TranscodeWorker *worker : m_workers) {
         worker->stop(); // Request threads to abort
         worker->wait(); // Join thread execution
+        delete worker;  // Clean up memory
     }
     m_workers.clear();
 
@@ -738,6 +736,8 @@ void MainWindow::startProcessing()
     m_actResetConfig->setEnabled(false);
     m_btnScan->setEnabled(false);
     m_btnStart->setEnabled(false);
+    m_btnResetDb->setEnabled(false);
+    m_btnResetScoreboard->setEnabled(false);
     m_btnStop->setEnabled(true);
     m_isQueueRunning = true;
 
@@ -1064,6 +1064,8 @@ void MainWindow::processingFinished()
     m_actDebob->setEnabled(true);
     m_actResetConfig->setEnabled(true);
     m_btnScan->setEnabled(true); // Unlock scan
+    m_btnResetDb->setEnabled(true); // Re-enable database reset
+    m_btnResetScoreboard->setEnabled(true); // Re-enable scoreboard reset
     updateStartButtonState(); // Enable start button if pending items remain
     m_btnStop->setEnabled(false); // Lock abort
     m_isQueueRunning = false;
