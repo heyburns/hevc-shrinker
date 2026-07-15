@@ -98,7 +98,7 @@ Terminal=false
     found = False
     for f in os.listdir("."):
         if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker"):
-            dest = os.path.join("dist", "HEVC_Video_Shrinker-2.0-x86_64.AppImage")
+            dest = os.path.join("dist", "HEVC_Video_Shrinker-2.0.1-x86_64.AppImage")
             if os.path.exists(dest):
                 os.remove(dest)
             shutil.move(f, dest)
@@ -144,7 +144,7 @@ Terminal=false
         
     # Create control file
     control_content = """Package: hevc-shrinker
-Version: 2.0-1
+Version: 2.0.1-1
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -171,7 +171,7 @@ Description: A native batch video compressor.
         tar.add(f"{pkg_dir}/usr", arcname="usr")
         
     # Build package using standard ar (dpkg-deb is not required!)
-    deb_out = "dist/hevc-shrinker_2.0-1_amd64.deb"
+    deb_out = "dist/hevc-shrinker_2.0.1-1_amd64.deb"
     if os.path.exists(deb_out):
         os.remove(deb_out)
         
@@ -209,7 +209,7 @@ def package_rpm():
     
     # Spec file contents
     spec_content = """Name:           hevc_shrinker
-Version:        2.0
+Version:        2.0.1
 Release:        1%{?dist}
 Summary:        Batch video compressor using HEVC H.265.
 
@@ -219,20 +219,22 @@ BuildArch:      x86_64
 Requires:       qt6-qtbase, ffmpeg
 
 %description
-Shrinks video libraries into optimized H.265 (HEVC) files.
+A native batch video compressor that shrinks video libraries into H.265 format using FFmpeg.
+
+%prep
+# No source unpacking needed
+
+%build
+# Pre-compiled binary, no building inside rpmbuild
 
 %install
-rm -rf $RPM_BUILD_ROOT
-mkdir -p $RPM_BUILD_ROOT/%{_bindir}
-mkdir -p $RPM_BUILD_ROOT/%{_datadir}/applications
-mkdir -p $RPM_BUILD_ROOT/%{_datadir}/icons/hicolor/512x512/apps
+mkdir -p %{buildroot}%{_bindir}
+mkdir -p %{buildroot}%{_datadir}/applications
+mkdir -p %{buildroot}%{_datadir}/icons/hicolor/512x512/apps
 
-cp %{_sourcedir}/hevc_shrinker $RPM_BUILD_ROOT/%{_bindir}/
-cp %{_sourcedir}/hevc_shrinker.desktop $RPM_BUILD_ROOT/%{_datadir}/applications/
-cp %{_sourcedir}/app_icon.png $RPM_BUILD_ROOT/%{_datadir}/icons/hicolor/512x512/apps/hevc_shrinker.png
-
-%clean
-rm -rf $RPM_BUILD_ROOT
+cp %{_sourcedir}/hevc_shrinker %{buildroot}%{_bindir}/hevc_shrinker
+cp %{_sourcedir}/hevc_shrinker.desktop %{buildroot}%{_datadir}/applications/hevc_shrinker.desktop
+cp %{_sourcedir}/app_icon.png %{buildroot}%{_datadir}/icons/hicolor/512x512/apps/hevc_shrinker.png
 
 %files
 %{_bindir}/hevc_shrinker
@@ -240,6 +242,8 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/icons/hicolor/512x512/apps/hevc_shrinker.png
 
 %changelog
+* Wed Jul 15 2026 HEVC Video Shrinker Developers <developer@example.com> - 2.0.1-1
+- Release version 2.0.1 with aq-mode=1
 * Sun Jul 05 2026 HEVC Video Shrinker Developers <developer@example.com> - 2.0-1
 - Initial C++ package build
 """

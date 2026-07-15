@@ -3,7 +3,7 @@
 
 [Setup]
 AppName=HEVC Video Shrinker
-AppVersion=2.0
+AppVersion=2.0.1
 AppPublisher=HEVC Video Shrinker
 DefaultDirName={autopf}\HEVCVideoShrinker
 DefaultGroupName=HEVC Video Shrinker
@@ -11,7 +11,7 @@ UninstallDisplayIcon={app}\hevc_shrinker.exe
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir=dist
-OutputBaseFilename=hevc_shrinker_setup_2.0_win64
+OutputBaseFilename=hevc_shrinker_setup_2.0.1_win64
 SetupIconFile=app_icon.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64

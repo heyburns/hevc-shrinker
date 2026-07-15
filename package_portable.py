@@ -5,7 +5,7 @@ import zipfile
 def package_portable():
     build_dir = "build"
     dist_dir = "dist"
-    portable_name = "hevc_shrinker_portable_2.0_win64"
+    portable_name = "hevc_shrinker_portable_2.0.1_win64"
     temp_dir = os.path.join(dist_dir, portable_name)
     zip_path = os.path.join(dist_dir, f"{portable_name}.zip")
     
