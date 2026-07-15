@@ -362,7 +362,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     } else {
         // Build x265 parameters: enforce Main 10 profile (10-bit H.265), disable Sample Adaptive Offset (SAO) for detail retention,
         // and set thread pools to match our partitioned thread count.
-        QString x265Params = "profile=main10:no-sao=1:selective-sao=0:pmode=1:pme=1";
+        QString x265Params = "profile=main10:no-sao=1:selective-sao=0:aq-mode=1:pmode=1:pme=1";
         if (threads > 0) {
             x265Params += QString(":pools=%1").arg(threads);
         }
