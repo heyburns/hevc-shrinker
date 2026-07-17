@@ -177,7 +177,7 @@ MainWindow::~MainWindow()
 // Builds the graphical layout, sidebar configurations, grid tables, and status meters.
 void MainWindow::initUi()
 {
-    setWindowTitle("HEVC Video Shrinker v2.0.1");
+    setWindowTitle("HEVC Video Shrinker v2.0.2");
     resize(1050, 620); // Widened default window size to fit columns without clipping text
 
     // 1. Create the Menu Bar
@@ -1352,7 +1352,7 @@ void MainWindow::onAboutSelected()
     msgBox.setWindowTitle("About HEVC Video Shrinker");
     msgBox.setTextFormat(Qt::RichText);
     msgBox.setIcon(QMessageBox::Information);
-    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.1</h3>"
+    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.2</h3>"
                            "<p>A multi-process, GPU-friendly video compressor interface written in C++ and Qt6.</p>"
                            "<p><b>Dependencies Status:</b><br/>"
                            "• FFmpeg: %1<br/>"
