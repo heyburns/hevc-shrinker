@@ -1176,11 +1176,24 @@ void MainWindow::showTableContextMenu(const QPoint &pos)
     if (!item) return;
 
     int row = item->row();
+    QTableWidgetItem *statusItem = m_tableQueue->item(row, 1);
     QTableWidgetItem *pathItem = m_tableQueue->item(row, 5);
     if (!pathItem) return;
 
+    QString status = statusItem ? statusItem->text() : "";
     QString relPath = pathItem->text();
     QString absPath = QDir(m_rootDir).filePath(relPath);
+
+    // If transcoding has completed, the original file is moved to .Trash
+    // and the processed .mkv output sits in its place.
+    QString playPath = absPath;
+    if (status == "Completed") {
+        QFileInfo fi(absPath);
+        QString mkvPath = fi.absolutePath() + "/" + fi.completeBaseName() + ".mkv";
+        if (QFile::exists(mkvPath)) {
+            playPath = mkvPath;
+        }
+    }
 
     QMenu menu(this);
     QAction *playAction = menu.addAction("Play Video");
@@ -1189,7 +1202,7 @@ void MainWindow::showTableContextMenu(const QPoint &pos)
     QAction *selected = menu.exec(m_tableQueue->viewport()->mapToGlobal(pos));
     if (selected == playAction) {
         // Opens the video asynchronously using the host OS's default media player
-        QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(playPath));
     }
 }
 
