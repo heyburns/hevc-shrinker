@@ -177,7 +177,7 @@ MainWindow::~MainWindow()
 // Builds the graphical layout, sidebar configurations, grid tables, and status meters.
 void MainWindow::initUi()
 {
-    setWindowTitle("HEVC Video Shrinker v2.0.2");
+    setWindowTitle("HEVC Video Shrinker v2.0.3");
     resize(1050, 620); // Widened default window size to fit columns without clipping text
 
     // 1. Create the Menu Bar
@@ -1352,7 +1352,7 @@ void MainWindow::onAboutSelected()
     msgBox.setWindowTitle("About HEVC Video Shrinker");
     msgBox.setTextFormat(Qt::RichText);
     msgBox.setIcon(QMessageBox::Information);
-    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.2</h3>"
+    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.3</h3>"
                            "<p>A multi-process, GPU-friendly video compressor interface written in C++ and Qt6.</p>"
                            "<p><b>Dependencies Status:</b><br/>"
                            "• FFmpeg: %1<br/>"
@@ -1479,12 +1479,12 @@ void MainWindow::updateViewfinderFrame(const QString &filepath, double secs)
                                  .arg(s, 2, 10, QChar('0')));
 
     // Dispatch FFmpeg subprocess to extract exactly 1 frame at the target time
-    // Scales picture width to 240px and keeps aspect ratios. Pipes binary PNG output to stdout.
+    // Normalizes to square pixels using iw*sar:ih, scales picture width to 240px, and pipes binary PNG output to stdout.
     m_viewfinderProcess->start(ffmpeg, {
         "-y",
         "-ss", timeStr,
         "-i", filepath,
-        "-vf", "scale=240:-1",
+        "-vf", "scale=iw*sar:ih,scale=240:-1",
         "-frames:v", "1",
         "-f", "image2pipe",
         "-vcodec", "png",

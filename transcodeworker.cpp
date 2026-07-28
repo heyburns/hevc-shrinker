@@ -110,7 +110,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
     QProcess proc;
     proc.start(ffprobeBin, {
         "-v", "error",
-        "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,avg_frame_rate,field_order,display_aspect_ratio",
+        "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,avg_frame_rate,field_order,display_aspect_ratio,sample_aspect_ratio",
         "-of", "json",
         filepath
     });
@@ -133,6 +133,7 @@ VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) 
                     meta.height = s["height"].toInt();
                     meta.fieldOrder = s["field_order"].toString().toLower();
                     meta.displayAspectRatio = s["display_aspect_ratio"].toString();
+                    meta.sampleAspectRatio = s["sample_aspect_ratio"].toString();
                     
                     // Framerates are returned as fractions (e.g. "30000/1001"). Parse them.
                     QString fpsStr = s["avg_frame_rate"].toString();
@@ -324,15 +325,76 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     // We only downsample frame rates (bobbed) if they exceed 50 FPS and the user has enabled it
     bool bobbed = (effectiveFps >= 50.0 && m_settings["debob"].toBool());
     
+    // Check if the video is anamorphic (has non-square pixels, where sample_aspect_ratio is not 1:1)
+    double par = 1.0;
+    if (!meta.sampleAspectRatio.isEmpty() && meta.sampleAspectRatio.contains(":")) {
+        QStringList parts = meta.sampleAspectRatio.split(":");
+        if (parts.size() == 2) {
+            double num = parts[0].toDouble();
+            double den = parts[1].toDouble();
+            if (den > 0.0) {
+                par = num / den;
+            }
+        }
+    }
+    
+    // Any PAR that isn't 1.0 (or 0.0) indicates anamorphic/non-square pixels
+    bool isAnamorphic = (qAbs(par - 1.0) > 0.005 && par > 0.0);
+
+    int targetWidth = meta.width;
+    int targetHeight = meta.height;
+    bool applyScaleFilter = false;
+
+    if (isAnamorphic) {
+        // Expand/squeeze the width based on the Pixel Aspect Ratio to normalize to square pixels (1:1 PAR)
+        targetWidth = static_cast<int>(qRound(meta.width * par) / 2) * 2;
+        targetHeight = meta.height;
+        applyScaleFilter = true;
+        emit logSignal(QString("[NOTICE] Anamorphic video detected (Pixel Aspect Ratio: %1). Normalizing to square pixels: %2x%3.")
+                       .arg(meta.sampleAspectRatio)
+                       .arg(targetWidth)
+                       .arg(targetHeight));
+    }
+
     // Check if the video dimensions exceed 1080p (1920x1080) and need downscaling
-    bool isPortrait = (meta.height > meta.width);
     bool needsDownscale = false;
     if (m_settings["downscale"].toBool()) {
-        if (isPortrait) {
-            needsDownscale = (meta.width > 1080 || meta.height > 1920);
+        bool targetIsPortrait = (targetHeight > targetWidth);
+        if (targetIsPortrait) {
+            if (targetWidth > 1080 || targetHeight > 1920) {
+                needsDownscale = true;
+            }
         } else {
-            needsDownscale = (meta.height > 1080 || meta.width > 1920);
+            if (targetHeight > 1080 || targetWidth > 1920) {
+                needsDownscale = true;
+            }
         }
+    }
+
+    if (needsDownscale) {
+        // Downscale to fit within a 1920x1080 bounding box while maintaining DAR (using square pixels)
+        double targetDar = static_cast<double>(targetWidth) / targetHeight;
+        bool targetIsPortrait = (targetHeight > targetWidth);
+        if (targetIsPortrait) {
+            if (targetHeight > 1920) {
+                targetHeight = 1920;
+                targetWidth = static_cast<int>(qRound(targetHeight * targetDar) / 2) * 2;
+            }
+            if (targetWidth > 1080) {
+                targetWidth = 1080;
+                targetHeight = static_cast<int>(qRound(targetWidth / targetDar) / 2) * 2;
+            }
+        } else {
+            if (targetWidth > 1920) {
+                targetWidth = 1920;
+                targetHeight = static_cast<int>(qRound(targetWidth / targetDar) / 2) * 2;
+            }
+            if (targetHeight > 1080) {
+                targetHeight = 1080;
+                targetWidth = static_cast<int>(qRound(targetHeight * targetDar) / 2) * 2;
+            }
+        }
+        applyScaleFilter = true;
     }
 
     // Check if file is in an obsolete format (e.g. WMV, AVI) which should be fully re-encoded to prevent container stream copy bugs.
@@ -340,7 +402,7 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
     bool isObsoleteFormat = (suffix == "wmv" || suffix == "flv" || suffix == "avi" || suffix == "asf" || suffix == "f4v" || suffix == "divx");
 
     // Codec target decisions (copy streams if they are already compliant, transcode otherwise)
-    QString wantVideoCodec = (isAlreadyHevc && !needsDownscale && !bobbed && !isInterlaced && !isObsoleteFormat) ? "copy" : "libx265";
+    QString wantVideoCodec = (isAlreadyHevc && !applyScaleFilter && !bobbed && !isInterlaced && !isObsoleteFormat) ? "copy" : "libx265";
     QString wantAudioCodec = (isAlreadyAac && !isObsoleteFormat) ? "copy" : "encode";
 
     // Create absolute filepath path for the temporary transcoding output file
@@ -381,21 +443,9 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
             // Apply double-framerate de-bob deinterlacer filter
             videoFilters << "bwdif=mode=send_field:parity=-1:deint=all";
         }
-        if (needsDownscale) {
-            // Scale keeping aspect ratio using high-quality Lanczos scaling algorithm
-            if (isPortrait) {
-                if (static_cast<double>(meta.height) / meta.width > 1920.0 / 1080.0) {
-                    videoFilters << "scale=-2:1920:flags=lanczos";
-                } else {
-                    videoFilters << "scale=1080:-2:flags=lanczos";
-                }
-            } else {
-                if (static_cast<double>(meta.width) / meta.height > 1920.0 / 1080.0) {
-                    videoFilters << "scale=1920:-2:flags=lanczos";
-                } else {
-                    videoFilters << "scale=-2:1080:flags=lanczos";
-                }
-            }
+        if (applyScaleFilter) {
+            // Apply scale filter to enforce square pixels and target dimensions using high-quality Lanczos scaling
+            videoFilters << QString("scale=%1:%2:flags=lanczos,setsar=1:1").arg(QString::number(targetWidth), QString::number(targetHeight));
         }
         if (bobbed) {
             // Downsample high frame rates back to half (typically 60fps to 30fps)

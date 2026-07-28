@@ -80,6 +80,7 @@ struct VideoMetadata {
     double fps = 0.0;               // Frame rate (Frames Per Second)
     QString fieldOrder;             // Interlacing status (e.g. "progressive", "tt", "bb")
     QString displayAspectRatio;     // Aspect ratio (e.g. "16:9", "4:3")
+    QString sampleAspectRatio;      // Pixel Aspect Ratio (e.g. "4:3", "1:1")
     bool hasAudio = false;          // True if an audio stream is present in the file
 };
 
