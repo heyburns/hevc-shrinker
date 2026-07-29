@@ -338,6 +338,26 @@ bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpeg
         }
     }
     
+    // Fallback: If SAR is missing or 1:1, check if container Display Aspect Ratio (DAR) implies anamorphic
+    if (qAbs(par - 1.0) < 0.005 && !meta.displayAspectRatio.isEmpty() && meta.displayAspectRatio.contains(":")) {
+        QStringList parts = meta.displayAspectRatio.split(":");
+        if (parts.size() == 2) {
+            double num = parts[0].toDouble();
+            double den = parts[1].toDouble();
+            if (den > 0.0 && meta.width > 0) {
+                double dar = num / den;
+                double calculatedPar = dar * (static_cast<double>(meta.height) / meta.width);
+                // If container DAR indicates non-square pixels, use the calculated PAR
+                if (qAbs(calculatedPar - 1.0) > 0.01 && calculatedPar > 0.0) {
+                    par = calculatedPar;
+                    emit logSignal(QString("[INFO] Derived Pixel Aspect Ratio (%1) from container Display Aspect Ratio: %2")
+                                   .arg(QString::number(par, 'f', 4))
+                                   .arg(meta.displayAspectRatio));
+                }
+            }
+        }
+    }
+    
     // Any PAR that isn't 1.0 (or 0.0) indicates anamorphic/non-square pixels
     bool isAnamorphic = (qAbs(par - 1.0) > 0.005 && par > 0.0);
 
