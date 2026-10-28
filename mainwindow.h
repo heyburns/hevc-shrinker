@@ -3,15 +3,10 @@
 
 #include <QMainWindow> // Core window container class
 #include <QTableWidget> // Grid-like spreadsheet table for queue display
-#include <QTextEdit> // Multi-line log terminal widget
 #include <QGroupBox> // Framed title container grouping widgets together
 #include <QProgressBar> // Graphical progress bar indicator
 #include <QLabel> // Plain text display widget
-#include <QLineEdit> // Single-line text input field (holds folder path)
 #include <QPushButton> // Clickable button trigger
-#include <QSpinBox> // Numeric selector input with up/down arrows
-#include <QComboBox> // Drop-down menu list selector
-#include <QCheckBox> // Toggleable checkbox selector
 #include <QVariantMap> // Dictionary holding generic setting values
 #include <QStringList> // Resizable list of string elements
 #include <QProcess> // Runs background executables (thumbnail seekers)
@@ -19,15 +14,8 @@
 #include <QFrame> // Frame container layout helper
 #include "databasemanager.h" // Database wrapper header
 #include "transcodeworker.h" // Background thread header
-
-// Structure representing a video file scanned inside the target folder
-struct ScannedFile {
-    QString absolutePath;   // Absolute local path (e.g. "/home/user/videos/movie.mp4")
-    QString filename;       // Just the filename (e.g. "movie.mp4")
-    QString relPath;        // Path relative to scanned folder (e.g. "subfolder/movie.mp4")
-    qint64 size = 0;        // Size in bytes
-    qint64 lastModified = 0;// Last modified UNIX timestamp (used to detect changes)
-};
+#include "scanworker.h"
+#include "avisynthpipeline.h"
 
 // UI Widget representing an active progress display card at the bottom.
 // Spawns dynamically for each concurrent transcode thread, hosting its own progress bar,
@@ -63,7 +51,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     // Constructor. Instantiates GUI layouts, connects triggers, checks dependencies.
-    MainWindow(QWidget *parent = nullptr);
+    MainWindow(QWidget *parent = nullptr, const QString &dbPath = {});
     
     // Destructor. Purges worker processes and cleans connections.
     ~MainWindow();
@@ -83,6 +71,7 @@ private slots:
     void onConcurrencySelected();
     void onDownscaleToggled(bool checked);
     void onDebobToggled(bool checked);
+    void onNvencToggled(bool checked);
     void onResetConfigSelected();
     
     // Help menu slots
@@ -91,6 +80,9 @@ private slots:
 
     // General slots
     void scanDirectory();
+    void clearQueue();
+    void configureAvisynth();
+    void scanFinished();
     void startProcessing();
     void stopProcessing();
     void resetSettings();
@@ -106,7 +98,7 @@ private slots:
     void startNextQueueJob();
     void onWorkerFinished();
     void onWorkerPreviewFrameRequested(const QString &filepath, double secs);
-    void onConcurrentChanged(int val);
+    void onEncodedPreviewReady(const QString &filepath, const QByteArray &png, double secs);
     void showTableContextMenu(const QPoint &pos);
 
     // Viewfinder slots
@@ -115,6 +107,27 @@ private slots:
     void onQueueTableSelectionChanged();
 
 private:
+    friend class RegressionTests;
+    ScanWorker *m_scanWorker = nullptr;
+    QString m_databasePath;
+    bool m_stopping = false;
+    void refreshScanForSettings();
+    void setConcurrencyLimit(int limit);
+    void updateWorkerPreviewSelection();
+    struct FilterAssignment {
+        AvisynthProfile profile;
+        qint64 sourceSize = 0, sourceModified = 0;
+        QString previousStatus, previousDetail;
+    };
+    QHash<QString, FilterAssignment> m_filterAssignments; // Memory only; never restored.
+    QVariantMap m_avisynthTools; // Overrides also expire with the batch.
+    QAction *m_actAvisynth = nullptr, *m_actClearQueue = nullptr;
+    QLabel *m_lblAvisynthSummary = nullptr;
+    void assignAvisynth(const QStringList &paths, const AvisynthProfile &profile, bool remove);
+    void clearAvisynthAssignments();
+    void updateAvisynthSummary();
+    QVariantMap currentEncodeSettings() const;
+
     // Menu elements
     QMenuBar *m_menuBar;
     QMenu *m_menuFile;
@@ -125,6 +138,7 @@ private:
     QAction *m_actShowPreview;
     QAction *m_actDownscale;
     QAction *m_actDebob;
+    QAction *m_actNvenc;
     QActionGroup *m_presetGroup;
 
     // File Menu Actions
@@ -178,6 +192,7 @@ private:
     QString m_preset;
     bool m_downscale;
     bool m_debob;
+    bool m_nvenc = false;
     bool m_livePreviewEnabled;
     int m_concurrentLimit;
 

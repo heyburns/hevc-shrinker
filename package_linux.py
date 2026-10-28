@@ -69,7 +69,15 @@ Terminal=false
 
     # Set up environment variables
     env = os.environ.copy()
-    env["QMAKE"] = "/usr/lib64/qt6/bin/qmake"
+    qmake = os.environ.get("QMAKE") or shutil.which("qmake6") or shutil.which("qmake")
+    if not qmake:
+        print("Qt qmake was not found; set QMAKE to the Qt 6 executable.")
+        return False
+    version = subprocess.run([qmake, "-query", "QT_VERSION"], capture_output=True, text=True)
+    if version.returncode != 0 or not version.stdout.strip().startswith("6."):
+        print("AppImage packaging requires Qt 6 qmake.")
+        return False
+    env["QMAKE"] = qmake
     env["NO_STRIP"] = "1"
     
     # Build the AppImage
@@ -87,6 +95,8 @@ Terminal=false
     if os.path.exists("AppDir"):
         shutil.rmtree("AppDir")
         
+    previous = {f: os.stat(f).st_mtime_ns for f in os.listdir(".")
+                if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker")}
     print("Running linuxdeploy to build AppImage...")
     res = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
@@ -94,10 +104,14 @@ Terminal=false
     if os.path.exists("hevc_shrinker.png"):
         os.remove("hevc_shrinker.png")
     
-    # Move compiled AppImage to dist/
+    if res.returncode != 0:
+        print(f"AppImage build failed. stdout: {res.stdout}\nstderr: {res.stderr}")
+        return False
+
+    # Move only a newly produced AppImage to dist/.
     found = False
     for f in os.listdir("."):
-        if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker"):
+        if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker") and previous.get(f) != os.stat(f).st_mtime_ns:
             dest = os.path.join("dist", "HEVC_Video_Shrinker-2.0.3-x86_64.AppImage")
             if os.path.exists(dest):
                 os.remove(dest)
@@ -177,7 +191,8 @@ Description: A native batch video compressor.
         
     # ar requires specific file ordering: debian-binary, control.tar.gz, data.tar.xz
     cmd = ["ar", "rcs", deb_out, "debian-binary", "control.tar.gz", "data.tar.xz"]
-    if run_cmd(cmd):
+    built = run_cmd(cmd)
+    if built:
         print(f"Debian package successfully built: {deb_out}")
     else:
         print("Failed to build Debian package.")
@@ -187,6 +202,7 @@ Description: A native batch video compressor.
         if os.path.exists(f):
             os.remove(f)
     shutil.rmtree(pkg_dir)
+    return built
 
 def package_rpm():
     print("\n=== 4. Packaging Red Hat (.rpm) ===")
@@ -195,10 +211,9 @@ def package_rpm():
     if not shutil.which("rpmbuild"):
         print("[NOTICE] 'rpmbuild' tool is missing. Skipping RPM packaging.")
         print("To enable RPM support on Gentoo, run: sudo emerge app-arch/rpm")
-        return
+        return True
         
-    home = os.path.expanduser("~")
-    rpmbuild_dir = os.path.join(home, "rpmbuild")
+    rpmbuild_dir = os.path.abspath("pack-rpm-tmp")
     for sub in ["BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"]:
         os.makedirs(os.path.join(rpmbuild_dir, sub), exist_ok=True)
         
@@ -256,21 +271,28 @@ cp %{_sourcedir}/app_icon.png %{buildroot}%{_datadir}/icons/hicolor/512x512/apps
         f.write(spec_content)
         
     # Run rpmbuild
-    if run_cmd(["rpmbuild", "-bb", spec_path]):
+    if run_cmd(["rpmbuild", "--define", f"_topdir {rpmbuild_dir}", "-bb", spec_path]):
         rpm_out_dir = os.path.join(rpmbuild_dir, "RPMS", "x86_64")
         for f in os.listdir(rpm_out_dir):
             if f.endswith(".rpm"):
                 shutil.copy(os.path.join(rpm_out_dir, f), "dist")
                 print(f"RPM package successfully built: dist/{f}")
+        return True
     else:
         print("Failed to build RPM package.")
+        return False
 
 if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     if not compile_project():
         print("Compilation failed. Aborting packaging.")
         sys.exit(1)
     
-    package_appimage()
-    package_deb()
-    package_rpm()
+    try:
+        results = [package_appimage(), package_deb(), package_rpm()]
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"Packaging failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    if not all(results):
+        sys.exit(1)
     print("\nPackaging run complete. Check the 'dist/' folder!")

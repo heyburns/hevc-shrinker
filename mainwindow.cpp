@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "avisynthdialog.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -7,9 +8,9 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QHeaderView>
-#include <QDirIterator>
+#include "filetransaction.h"
 #include <QFileInfo>
-#include <QScrollBar>
+#include <QStatusBar>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -20,6 +21,8 @@
 #include <QActionGroup>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QSignalBlocker>
+#include <cmath>
 
 // -------------------------------------------------------------
 // TranscodeMonitorCard Implementation
@@ -101,7 +104,9 @@ void TranscodeMonitorCard::updateProgress(int percentage, double fps, double spe
                             .arg(elapsedSec / 60, 2, 10, QChar('0'))
                             .arg(elapsedSec % 60, 2, 10, QChar('0'));
 
-    m_lblPerf->setText(QString("%1 FPS | %2x").arg(QString::number(fps, 'f', 0), QString::number(speed, 'f', 2)));
+    const QString fpsText = std::isfinite(fps) && fps >= 0 ? QString::number(fps, 'f', 0) + " FPS" : "FPS N/A";
+    const QString speedText = std::isfinite(speed) && speed >= 0 ? QString::number(speed, 'f', 2) + "x" : "Speed N/A";
+    m_lblPerf->setText(fpsText + " | " + speedText);
     m_lblTime->setText(QString("Elapsed: %1 | Remaining: %2").arg(elapsedStr, etaStr));
 
     // Display sizing details. Hide projection until at least 3% is processed to avoid math skew.
@@ -119,7 +124,8 @@ void TranscodeMonitorCard::updateProgress(int percentage, double fps, double spe
         );
     }
 
-    m_progressBar->setValue(percentage);
+    m_progressBar->setRange(0, percentage < 0 ? 0 : 100);
+    if (percentage >= 0) m_progressBar->setValue(percentage);
 }
 
 // Sets initial label configurations when worker status updates occur
@@ -131,15 +137,15 @@ void TranscodeMonitorCard::updateStatus(const QString &status, const QString &de
         m_lblPerf->setText("N/A");
         m_lblTime->setText("N/A");
         m_lblSize->setText("N/A");
+        m_progressBar->setRange(0, 100);
         m_progressBar->setValue(0);
     }
 }
 
 // Constructor: Initializes the main window interface components.
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(QWidget *parent, const QString &dbPath)
     : QMainWindow(parent)
-    , m_dbManager(nullptr)
-    , m_isQueueRunning(false)
+    , m_databasePath(dbPath)
     , m_viewfinderProcess(nullptr)
     , m_crf(28)
     , m_preset("medium")
@@ -147,6 +153,8 @@ MainWindow::MainWindow(QWidget *parent)
     , m_debob(true)
     , m_livePreviewEnabled(false)
     , m_concurrentLimit(1)
+    , m_dbManager(nullptr)
+    , m_isQueueRunning(false)
 {
     initUi(); // Build the window layouts and components
     checkDependencies(); // Verify if ffmpeg/ffprobe exist
@@ -158,6 +166,8 @@ MainWindow::MainWindow(QWidget *parent)
 // Destructor: Safely stops and joins any active transcode threads on exit.
 MainWindow::~MainWindow()
 {
+    if (m_scanWorker) { m_scanWorker->stop(); m_scanWorker->wait(); }
+    for (auto *worker : m_workers) worker->stop();
     for (TranscodeWorker *worker : m_workers) {
         worker->stop(); // Request threads to abort
         worker->wait(); // Join thread execution
@@ -244,6 +254,18 @@ void MainWindow::initUi()
     m_actResetConfig = m_menuOptions->addAction("Restore settings to defaults");
     connect(m_actResetConfig, &QAction::triggered, this, &MainWindow::onResetConfigSelected);
 
+    auto *advanced = m_menuBar->addMenu("Advanced");
+    m_actNvenc = advanced->addAction("Use NVIDIA hardware encoding");
+    m_actNvenc->setCheckable(true);
+    m_actNvenc->setChecked(m_nvenc);
+    m_actNvenc->setToolTip("Faster encoding with some loss of detail. Uses fixed settings and requires a compatible NVIDIA GPU and driver.");
+    connect(m_actNvenc, &QAction::toggled, this, &MainWindow::onNvencToggled);
+    advanced->addSeparator();
+    m_actAvisynth = advanced->addAction("AviSynth cleanup…");
+    connect(m_actAvisynth, &QAction::triggered, this, &MainWindow::configureAvisynth);
+    m_actClearQueue = m_menuFile->addAction("Clear Queue");
+    connect(m_actClearQueue, &QAction::triggered, this, &MainWindow::clearQueue);
+
     // Help Menu
     m_menuHelp = m_menuBar->addMenu("Help");
     QAction *actGuide = m_menuHelp->addAction("Usage Guide");
@@ -269,9 +291,9 @@ void MainWindow::initUi()
     QVBoxLayout *tableLayout = new QVBoxLayout(tableGroup);
     tableLayout->setContentsMargins(5, 10, 5, 5);
 
-    m_tableQueue = new QTableWidget(0, 6);
+    m_tableQueue = new QTableWidget(0, 7);
     m_tableQueue->setHorizontalHeaderLabels({
-        "Filename", "Status", "Original Size", "Compressed Size", "Progress", "Path"
+        "Filename", "Status", "Original Size", "Compressed Size", "Progress", "Path", "AviSynth"
     });
     m_tableQueue->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tableQueue->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -281,7 +303,7 @@ void MainWindow::initUi()
     connect(m_tableQueue, &QTableWidget::itemSelectionChanged, this, &MainWindow::onQueueTableSelectionChanged);
 
     QHeaderView *header = m_tableQueue->horizontalHeader();
-    for (int col = 0; col < 6; ++col) {
+    for (int col = 0; col < m_tableQueue->columnCount(); ++col) {
         header->setSectionResizeMode(col, QHeaderView::Interactive);
     }
     header->setStretchLastSection(true);
@@ -292,6 +314,7 @@ void MainWindow::initUi()
     m_tableQueue->setColumnWidth(3, 115);
     m_tableQueue->setColumnWidth(4, 160);
     m_tableQueue->setColumnWidth(5, 100);
+    m_tableQueue->setColumnWidth(6, 120);
 
     tableLayout->addWidget(m_tableQueue);
     rightSplitter->addWidget(tableGroup);
@@ -333,6 +356,9 @@ void MainWindow::initUi()
     m_lblConfigSummary->setStyleSheet("font-weight: bold; font-size: 11px; padding: 4px; border: 1px solid palette(mid); border-radius: 4px; background-color: palette(alternate-base);");
     updateConfigSummaryText();
     leftLayout->addWidget(m_lblConfigSummary);
+    m_lblAvisynthSummary = new QLabel("AviSynth: OFF for this batch");
+    m_lblAvisynthSummary->setWordWrap(true);
+    leftLayout->addWidget(m_lblAvisynthSummary);
 
     // Live Viewfinder monitor frame
     m_viewfinderGroup = new QGroupBox("Live Viewfinder");
@@ -458,17 +484,11 @@ void MainWindow::initUi()
 
 void MainWindow::updateConfigSummaryText()
 {
-    QString summary = QString("<b>Current Settings:</b><br/>"
-                              "Codec: H.265 (HEVC)<br/>"
-                              "Quality: CRF %1<br/>"
-                              "CPU Speed: %2<br/>"
-                              "De-bob: %3 | Downscale: %4<br/>"
-                              "Concurrency: %5 encodes in parallel")
-                      .arg(QString::number(m_crf),
-                           m_preset,
-                           m_debob ? "ON" : "OFF",
-                           m_downscale ? "ON" : "OFF",
-                           QString::number(m_concurrentLimit));
+    QString summary = "<b>Current Settings:</b><br/>Codec: H.265 (HEVC)<br/>";
+    summary += m_nvenc ? QString("Encoder: NVIDIA NVENC<br/>Quality: Fixed<br/>")
+        : QString("Encoder: CPU x265<br/>Quality: CRF %1<br/>CPU Speed: %2<br/>").arg(m_crf).arg(m_preset);
+    summary += QString("De-bob: %1 | Downscale: %2<br/>Concurrency: %3 encodes in parallel")
+        .arg(m_debob ? "ON" : "OFF", m_downscale ? "ON" : "OFF", QString::number(m_concurrentLimit));
     if (m_lblConfigSummary) {
         m_lblConfigSummary->setText(summary);
     }
@@ -504,11 +524,11 @@ void MainWindow::checkDependencies()
 // Slot triggered when clicking "Browse" button. Sets up the active target directory path.
 void MainWindow::selectDirectory()
 {
+    if (m_scanWorker || !m_workers.isEmpty() || m_isQueueRunning) return;
     // Open directories dialog
     QString dirSelected = QFileDialog::getExistingDirectory(this, "Select Workspace Folder", m_rootDir);
     if (dirSelected.isEmpty()) return;
 
-    m_rootDir = QDir(dirSelected).absolutePath();
     m_rootDir = QDir(dirSelected).absolutePath();
 
     // Release old database managers
@@ -518,17 +538,9 @@ void MainWindow::selectDirectory()
     try {
         QFileInfo dirInfo(m_rootDir);
         if (dirInfo.exists() && dirInfo.isDir()) {
-            m_dbManager = new DatabaseManager();
+            m_dbManager = new DatabaseManager(m_databasePath);
+            if (!m_dbManager->isReady()) throw std::runtime_error(m_dbManager->lastError().toStdString());
             logMessage(QString("Selected workspace: %1").arg(m_rootDir));
-            
-            // Check if directory contains a legacy database file processed_files.db.
-            // If it does, automatically import its records into the user's global profile datastore.
-            QString localDbPath = QDir(m_rootDir).filePath("processed_files.db");
-            if (QFile::exists(localDbPath)) {
-                logMessage("Local database detected in workspace. Migrating records to global database...");
-                m_dbManager->migrateLocalDatabase(localDbPath, m_rootDir);
-                logMessage("Migration complete. Local database has been renamed to processed_files.db.migrated.");
-            }
             
             // Enable workspace-scoped controls
             m_btnScan->setEnabled(true);
@@ -549,182 +561,106 @@ void MainWindow::selectDirectory()
         m_btnResetScoreboard->setEnabled(false);
     }
 
+    clearAvisynthAssignments();
     // Reset GUI queue state
     m_tableQueue->setRowCount(0);
     m_scannedFiles.clear();
     m_activeTranscodeQueue.clear();
     m_btnStart->setEnabled(false);
+    updateSavingsDashboard();
 }
 
-// Recursive helper function scanning local subfolders for video extensions.
-// Ignores .Trash and .Errors folders automatically.
-static void scanDirRecursive(const QString &dirPath, const QString &rootDir, const QStringList &videoExtensions, QList<ScannedFile> &scannedFiles)
-{
-    // Keeps GUI events processing during folder traversal
-    QCoreApplication::processEvents();
-
-    // Ignore Trash and Errors subfolders
-    if (dirPath.contains("/.Trash") || dirPath.contains("/.Errors") ||
-        dirPath.contains("\\.Trash") || dirPath.contains("\\.Errors")) {
-        return;
-    }
-
-    QDir dir(dirPath);
-    QFileInfoList list = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QFileInfo &fi : list) {
-        if (fi.isDir()) {
-            scanDirRecursive(fi.absoluteFilePath(), rootDir, videoExtensions, scannedFiles);
-        } else {
-            if (videoExtensions.contains(fi.suffix().toLower())) {
-                ScannedFile sf;
-                sf.absolutePath = fi.absoluteFilePath();
-                sf.filename = fi.fileName();
-                sf.relPath = QDir(rootDir).relativeFilePath(sf.absolutePath);
-                sf.size = fi.size();
-                sf.lastModified = fi.lastModified().toSecsSinceEpoch();
-                scannedFiles.append(sf);
-            }
-        }
-    }
-}
-
+// Scanning owns its database/processes on a worker thread; no nested GUI event loops.
 void MainWindow::scanDirectory()
 {
-    if (m_rootDir.isEmpty()) return;
-
-    logMessage(QString("Scanning workspace directory: %1").arg(m_rootDir));
+    if (m_rootDir.isEmpty() || m_scanWorker || m_isQueueRunning || !m_workers.isEmpty()) return;
+    clearAvisynthAssignments();
+    m_actNvenc->setEnabled(false);
+    m_actAvisynth->setEnabled(false);
+    m_actClearQueue->setEnabled(false);
+    m_btnStart->setEnabled(false);
+    m_btnScan->setEnabled(false);
+    m_actOpen->setEnabled(false);
+    m_actScan->setEnabled(false);
+    m_menuOptions->setEnabled(false);
+    m_btnResetDb->setEnabled(false);
+    m_btnResetScoreboard->setEnabled(false);
+    m_btnStop->setText("Cancel Scan");
+    m_btnStop->setEnabled(true);
     m_scannedFiles.clear();
     m_activeTranscodeQueue.clear();
-    m_tableQueue->setRowCount(0); // Wipe table cells
+    m_tableQueue->setRowCount(0);
+    const QVariantMap settings{{"crf", m_crf}, {"preset", m_preset}, {"nvenc", m_nvenc},
+        {"downscale", m_downscale}, {"debob", m_debob}};
+    m_scanWorker = new ScanWorker(m_rootDir, m_dbManager ? m_dbManager->path() : m_databasePath, settings, this);
+    connect(m_scanWorker, &ScanWorker::logSignal, this, &MainWindow::logMessage);
+    connect(m_scanWorker, &QThread::finished, this, &MainWindow::scanFinished);
+    statusBar()->showMessage("Scanning workspace...");
+    m_scanWorker->start();
+}
 
-    QString ffprobeBin = findDependency("ffprobe");
-
-    // Supported Video Extensions (Case-Insensitive)
-    static const QStringList videoExtensions = {
-        "mp4", "mkv", "wmv", "avi", "mov", "flv", "mpeg", "mpg", "vid", "m4v", "asf", "f4v", "divx"
-    };
-
-    // 1. Traverse directory recursively to find video files
-    scanDirRecursive(m_rootDir, m_rootDir, videoExtensions, m_scannedFiles);
-
-    logMessage(QString("Found %1 video files.").arg(m_scannedFiles.count()));
-
-    // OPTIMIZATION: Disable table redraw painting temporarily.
-    // Inserting hundreds of rows into a QTableWidget causes massive rendering lag
-    // if Qt attempts to re-calculate layouts and repaint after every cell insertion.
+void MainWindow::scanFinished()
+{
+    auto *worker = m_scanWorker;
+    if (!worker) return;
+    worker->wait();
+    if (!worker->wasCancelled() && worker->error.isEmpty()) m_scannedFiles = worker->files;
+    const QString message = worker->wasCancelled() ? "Scan cancelled."
+        : worker->error.isEmpty() ? QString("Scan complete: %1 videos.").arg(m_scannedFiles.size()) : worker->error;
+    worker->deleteLater();
+    m_scanWorker = nullptr;
     m_tableQueue->setUpdatesEnabled(false);
-    m_tableQueue->setRowCount(m_scannedFiles.count());
-    
-    int cacheHits = 0;
-    int cacheMisses = 0;
-
-    // 2. Iterate through each scanned file to determine status (Completed, Compliant, or Pending)
-    for (int idx = 0; idx < m_scannedFiles.count(); ++idx) {
-        const ScannedFile &sf = m_scannedFiles[idx];
-        QString filepath = sf.absolutePath;
-        QString filename = sf.filename;
-        QString relPath = sf.relPath;
-        double sizeMb = static_cast<double>(sf.size) / (1024.0 * 1024.0);
-
-        bool isProcessed = false;
-        bool isCompliant = false;
-
-        QString origSizeDisplay = QString("%1 MB").arg(QString::number(sizeMb, 'f', 1));
-        QString compSizeDisplay = "N/A";
-        QString status = "Pending";
-        QString detail = "Waiting...";
-
-        // Query Database: check if this file has already been shrunk in the past
-        if (m_dbManager) {
-            ProcessedFileInfo info = m_dbManager->getProcessedFileInfo(filepath);
-            if (info.found) {
-                isProcessed = true;
-                origSizeDisplay = QString("%1 MB").arg(QString::number(static_cast<double>(info.originalSize) / (1024.0 * 1024.0), 'f', 1));
-                compSizeDisplay = QString("%1 MB").arg(QString::number(static_cast<double>(info.compressedSize) / (1024.0 * 1024.0), 'f', 1));
+    m_tableQueue->setRowCount(m_scannedFiles.size());
+    for (int row = 0; row < m_scannedFiles.size(); ++row) {
+        const auto &file = m_scannedFiles[row];
+        const bool previous = file.history.found && file.status != "Pending";
+        const double original = previous ? file.history.originalSize : file.size;
+        const double compressedSize = previous ? file.history.compressedSize : file.size;
+        const QString compressed = file.status == "Completed" || file.status == "Skipped"
+            ? QString("%1 MB").arg(compressedSize / (1024.0 * 1024.0), 0, 'f', 1) : "N/A";
+        const QStringList cells{file.filename, file.status, QString("%1 MB").arg(original / (1024.0 * 1024.0), 0, 'f', 1),
+            compressed, file.detail, file.relPath, "Off"};
+        for (int col = 0; col < cells.size(); ++col) {
+            auto *item = new QTableWidgetItem(cells[col]);
+            if (file.status != "Pending") {
+                item->setBackground(file.status == "Completed" ? Qt::darkGreen : file.status == "Skipped" ? Qt::darkYellow : Qt::darkRed);
+                item->setForeground(Qt::white);
             }
-        }
-
-        // Query Compliance: if not already processed, check if it's already H.265+AAC (compliant)
-        if (!isProcessed && !ffprobeBin.isEmpty()) {
-            qint64 fileSize = sf.size;
-            qint64 lastModified = sf.lastModified;
-            int cached = -1;
-            
-            // Check scan_cache table to bypass slow shell-probe calls
-            if (m_dbManager) {
-                cached = m_dbManager->getCachedCompliance(filepath, fileSize, lastModified);
-            }
-
-            if (cached != -1) {
-                isCompliant = (cached == 1);
-                cacheHits++; // Saved CPU cycles!
-            } else {
-                cacheMisses++; // Probe file using FFprobe
-                isCompliant = probeFileCompliance(filepath, ffprobeBin);
-                // Save outcome to scan cache
-                if (m_dbManager) {
-                    m_dbManager->setCachedCompliance(filepath, fileSize, lastModified, isCompliant ? 1 : 0);
-                }
-            }
-            if (isCompliant) {
-                compSizeDisplay = origSizeDisplay; // Compliant files won't change size
-            }
-        }
-
-        // Map status text and build queue list
-        if (isProcessed) {
-            status = "Completed";
-            detail = "Already processed (in DB)";
-        } else if (isCompliant) {
-            status = "Skipped";
-            detail = "Already compliant (HEVC+AAC)";
-        } else {
-            status = "Pending";
-            detail = "Waiting...";
-            m_activeTranscodeQueue.append(filepath); // Add to transcode queue
-        }
-
-        // Populate Table Grid cells
-        m_tableQueue->setItem(idx, 0, new QTableWidgetItem(filename));
-        m_tableQueue->setItem(idx, 1, new QTableWidgetItem(status));
-        m_tableQueue->setItem(idx, 2, new QTableWidgetItem(origSizeDisplay));
-        m_tableQueue->setItem(idx, 3, new QTableWidgetItem(compSizeDisplay));
-        m_tableQueue->setItem(idx, 4, new QTableWidgetItem(detail));
-        m_tableQueue->setItem(idx, 5, new QTableWidgetItem(relPath));
-
-        // Color-code grid rows dynamically
-        if (isProcessed) {
-            for (int col = 0; col < 6; ++col) {
-                QTableWidgetItem *item = m_tableQueue->item(idx, col);
-                if (item) {
-                    item->setBackground(Qt::darkGreen);
-                    item->setForeground(Qt::white);
-                }
-            }
-        } else if (isCompliant) {
-            for (int col = 0; col < 6; ++col) {
-                QTableWidgetItem *item = m_tableQueue->item(idx, col);
-                if (item) {
-                    item->setBackground(Qt::darkYellow);
-                    item->setForeground(Qt::white);
-                }
-            }
+            m_tableQueue->setItem(row, col, item);
         }
     }
-    m_tableQueue->setUpdatesEnabled(true); // Re-enable grid repainting updates
+    m_tableQueue->setUpdatesEnabled(true);
+    m_actOpen->setEnabled(true);
+    m_actScan->setEnabled(true);
+    m_menuOptions->setEnabled(true);
+    m_actNvenc->setEnabled(true);
+    m_actAvisynth->setEnabled(true);
+    m_actClearQueue->setEnabled(true);
+    m_btnScan->setEnabled(true);
+    m_btnResetDb->setEnabled(true);
+    m_btnResetScoreboard->setEnabled(true);
+    m_btnStop->setText("Abort Job");
+    m_btnStop->setEnabled(false);
+    updateStartButtonState();
+    updateSavingsDashboard();
+    logMessage(message);
+    statusBar()->showMessage(message);
+}
 
-    updateSavingsDashboard(); // Recalculate scoreboard stats
-    logMessage(QString("Scan complete. Cache Hits: %1, Cache Misses: %2. %3 files queued for processing.")
-        .arg(cacheHits).arg(cacheMisses).arg(m_activeTranscodeQueue.count()));
-
-    m_btnStart->setEnabled(m_activeTranscodeQueue.count() > 0);
+void MainWindow::refreshScanForSettings()
+{
+    if (!m_rootDir.isEmpty() && !m_scanWorker && !m_isQueueRunning && m_workers.isEmpty()) scanDirectory();
 }
 
 // Triggered by clicking "Start Queue". Spawns initial concurrent threads.
 void MainWindow::startProcessing()
 {
-    if (m_activeTranscodeQueue.isEmpty() || m_rootDir.isEmpty()) return;
+    if (m_activeTranscodeQueue.isEmpty() || m_rootDir.isEmpty() || m_scanWorker || !m_workers.isEmpty() || m_isQueueRunning) return;
 
+    m_actNvenc->setEnabled(false);
+    m_actAvisynth->setEnabled(false);
+    m_actClearQueue->setEnabled(false);
+    updateAvisynthSummary();
     // Lock configuration UI menus during queue execution (keep parent menus enabled, lock individual items)
     m_actOpen->setEnabled(false);
     m_actScan->setEnabled(false);
@@ -740,11 +676,15 @@ void MainWindow::startProcessing()
     m_btnResetScoreboard->setEnabled(false);
     m_btnStop->setEnabled(true);
     m_isQueueRunning = true;
+    m_stopping = false;
 
     m_pendingQueue = m_activeTranscodeQueue;
     m_latestFileTimestamps.clear();
 
-    logMessage(QString("Starting transcode queue with %1 files...").arg(m_pendingQueue.count()));
+    int filteredCount = 0;
+    for (const auto &path : m_pendingQueue) if (m_filterAssignments.contains(path)) ++filteredCount;
+    logMessage(QString("Starting %1 files; AviSynth enabled for %2.").arg(m_pendingQueue.count()).arg(filteredCount));
+    statusBar()->showMessage(QString("Starting queue: %1 files, %2 with AviSynth cleanup.").arg(m_pendingQueue.count()).arg(filteredCount));
 
     // Clear bottom progress card panel layout
     if (m_monitorsLayout->count() > 0) {
@@ -764,28 +704,27 @@ void MainWindow::startProcessing()
 // Instantiates a new TranscodeWorker thread, connects signals, and starts execution.
 void MainWindow::startNextQueueJob()
 {
-    if (!m_isQueueRunning || m_pendingQueue.isEmpty()) return;
+    if (!m_isQueueRunning || m_pendingQueue.isEmpty() || m_workers.size() >= m_concurrentLimit) return;
 
-    // Take the next filepath from the pending queue
     QString filepath = m_pendingQueue.takeFirst();
     logMessage(QString("Dispatching transcode job: %1").arg(QFileInfo(filepath).fileName()));
 
-    // Populate transcode parameters mapping
-    QVariantMap settings;
-    settings["crf"] = m_crf;
-    settings["preset"] = m_preset;
-    settings["downscale"] = m_downscale;
-    settings["debob"] = m_debob;
-    settings["live_preview"] = m_livePreviewEnabled;
+    QVariantMap settings = currentEncodeSettings();
+    settings["live_preview"] = m_livePreviewEnabled && m_viewfinderFocusedFile == filepath;
+    if (m_filterAssignments.contains(filepath)) {
+        const auto assignment = m_filterAssignments.value(filepath);
+        settings["avs_enabled"] = true;
+        settings["avs_name"] = assignment.profile.name;
+        settings["avs_filters"] = assignment.profile.filters;
+        settings["avs_source_size"] = assignment.sourceSize;
+        settings["avs_source_modified"] = assignment.sourceModified;
+        for (const QString &tool : {QString("ffmpeg"), QString("ffprobe")}) {
+            const QString override = m_avisynthTools.value("avs_" + tool).toString();
+            if (!override.isEmpty()) settings[tool] = override;
+        }
+    }
 
-    // Recalculate CPU threads split dynamically.
-    // Splits cores evenly between concurrent encodes to avoid context switching.
-    int totalCores = QThread::idealThreadCount();
-    int maxConcurrent = m_concurrentLimit;
-    int threadsPerJob = qMax(1, totalCores / maxConcurrent);
-    settings["threads"] = threadsPerJob;
-
-    QString dbPath = QDir(m_rootDir).filePath("processed_files.db");
+    QString dbPath = m_dbManager ? m_dbManager->path() : m_databasePath;
     TranscodeWorker *worker = new TranscodeWorker(QStringList{filepath}, m_rootDir, dbPath, settings, this);
     worker->setProperty("filepath", filepath);
 
@@ -811,8 +750,9 @@ void MainWindow::startNextQueueJob()
     connect(worker, &TranscodeWorker::progressSignal, this, &MainWindow::updateProgress);
     connect(worker, &TranscodeWorker::statusSignal, this, &MainWindow::updateStatus);
     connect(worker, &TranscodeWorker::fileDoneSignal, this, &MainWindow::fileDone);
-    connect(worker, &TranscodeWorker::finishedSignal, this, &MainWindow::onWorkerFinished);
+    connect(worker, &QThread::finished, this, &MainWindow::onWorkerFinished);
     connect(worker, &TranscodeWorker::previewFrameSignal, this, &MainWindow::onWorkerPreviewFrameRequested);
+    connect(worker, &TranscodeWorker::encodedPreviewSignal, this, &MainWindow::onEncodedPreviewReady);
 
     m_workers.append(worker); // Keep track of the active worker thread handle
     worker->start(); // Launch background execution loop
@@ -824,6 +764,7 @@ void MainWindow::onWorkerFinished()
     TranscodeWorker *worker = qobject_cast<TranscodeWorker*>(sender());
     if (!worker) return;
 
+    worker->wait(); // Join thread-local cleanup before releasing its owner.
     m_workers.removeOne(worker); // Remove thread from active list
     worker->deleteLater(); // Queue thread memory deletion
 
@@ -846,22 +787,6 @@ void MainWindow::onWorkerFinished()
     }
 }
 
-// Triggered when concurrent encodes spinbox values change during queue execution.
-void MainWindow::onConcurrentChanged(int val)
-{
-    if (!m_isQueueRunning) return;
-
-    int activeCount = m_workers.count();
-    // Scale up: if slots increased, start new transcode threads immediately
-    if (activeCount < val) {
-        int spawnCount = val - activeCount;
-        for (int i = 0; i < spawnCount; ++i) {
-            startNextQueueJob();
-        }
-    }
-    // Scale down: let running workers complete naturally. onWorkerFinished() blocks new spawns.
-}
-
 // Receives preview extraction requests from worker threads and routes them to corresponding cards
 void MainWindow::onWorkerPreviewFrameRequested(const QString &filepath, double secs)
 {
@@ -872,63 +797,50 @@ void MainWindow::onWorkerPreviewFrameRequested(const QString &filepath, double s
     }
 }
 
-// Slot triggered when clicking "Abort Job". Cancels and joins all active encodes.
+void MainWindow::onEncodedPreviewReady(const QString &filepath, const QByteArray &png, double secs)
+{
+    if (!m_livePreviewEnabled || filepath != m_viewfinderFocusedFile || !m_isQueueRunning) return;
+    QPixmap frame;
+    if (!frame.loadFromData(png, "PNG")) return;
+    m_lblViewfinder->setPixmap(frame.scaled(m_lblViewfinder->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    m_lblViewfinderTime->setText(QString("Encoded preview: %1:%2:%3")
+        .arg(int(secs) / 3600, 2, 10, QChar('0')).arg(int(secs) / 60 % 60, 2, 10, QChar('0'))
+        .arg(int(secs) % 60, 2, 10, QChar('0')));
+}
+
+// Cancellation is asynchronous. Keep result signals connected so active rows
+// reach Cancelled (or Completed if their file commit already started).
 void MainWindow::stopProcessing()
 {
-    logMessage("[ABORT] Stopping all active transcode tasks...");
-    m_btnStop->setEnabled(false);
+    if (m_scanWorker) {
+        m_scanWorker->stop();
+        m_btnStop->setEnabled(false);
+        return;
+    }
+    if (m_workers.isEmpty()) return;
+    m_stopping = true;
     m_isQueueRunning = false;
-    m_pendingQueue.clear(); // Wipe the pending execution queue
-
-    // Tell all running worker threads to abort their background loops
-    for (TranscodeWorker *worker : m_workers) {
-        worker->disconnect(this); // Disconnect signals going to MainWindow
-        worker->stop();
-    }
-
-    // Wait for all workers to shut down and clean up thread memory handles
-    for (TranscodeWorker *worker : m_workers) {
-        worker->wait();
-        worker->deleteLater();
-    }
-    m_workers.clear();
-
-    // Delete all active GUI monitor cards
-    QList<QString> keys = m_activeCards.keys();
-    for (const QString &key : keys) {
-        TranscodeMonitorCard *card = m_activeCards.take(key);
-        m_monitorsLayout->removeWidget(card);
-        delete card;
-    }
-    m_activeCards.clear();
-
-    // Re-insert layout stretches
-    m_monitorsLayout->addStretch();
-
-    // Clear viewfinder
-    m_viewfinderFocusedFile = "";
-    m_lblViewfinderStatus->setText("Now Viewing: Standby");
-    m_lblViewfinderTime->setText("Current Time: N/A");
-    m_lblViewfinder->clear();
-    m_lblViewfinder->setText("Standby / Select active encode");
-    if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
-        m_viewfinderProcess->kill();
-        m_viewfinderProcess->waitForFinished();
-    }
-    m_viewfinderBuffer.clear();
-
-    processingFinished(); // Unlock GUI control panels
+    m_pendingQueue.clear();
+    m_btnStop->setEnabled(false);
+    for (auto *worker : m_workers) worker->stop();
+    if (m_viewfinderProcess->state() != QProcess::NotRunning) m_viewfinderProcess->kill();
+    statusBar()->showMessage("Stopping active jobs...");
 }
 
 // Restores user settings back to initial baseline presets
 void MainWindow::resetSettings()
 {
+    clearAvisynthAssignments();
     m_crf = 28;
     m_preset = "medium";
     m_downscale = true;
     m_debob = true;
     m_livePreviewEnabled = false;
     m_concurrentLimit = 1;
+    m_actNvenc->setChecked(false);
+    m_nvenc = false;
+    m_actCrf->setEnabled(true);
+    m_menuPreset->setEnabled(true);
 
     // Update menu action states
     m_actShowPreview->setChecked(false);
@@ -946,12 +858,15 @@ void MainWindow::resetSettings()
 
     updateConfigSummaryText();
     logMessage("Configuration settings reset to defaults.");
+    refreshScanForSettings();
 }
 
 // Writes print statements to standard output.
 void MainWindow::logMessage(const QString &message)
 {
     qDebug().noquote() << message;
+    if (message.startsWith("[Failed]") || message.contains("History could not be saved"))
+        statusBar()->showMessage(message);
 }
 
 // Updates percentages and sizing projections in the queue grid row and routes to monitor cards.
@@ -961,7 +876,9 @@ void MainWindow::updateProgress(const QString &filepath, int percentage, double 
     if (idx != -1) {
         // Format table progress cell details (e.g. "48% (1.5x | ETA 03:12)")
         QString statsStr = (etaStr != "N/A") ? QString(" (%1x | ETA %2)").arg(QString::number(speed, 'f', 1), etaStr) : "";
-        m_tableQueue->setItem(idx, 4, new QTableWidgetItem(QString("%1%%2").arg(QString::number(percentage), statsStr)));
+        const QString progressText = percentage < 0 ? "Encoding…" + statsStr
+            : QString("%1%%2").arg(QString::number(percentage), statsStr);
+        m_tableQueue->setItem(idx, 4, new QTableWidgetItem(progressText));
 
         // Update the "Compressed Size" column dynamically while transcoding is running.
         // Once 3% or more is processed, we display "Current Size / ~Estimated Size" (formatted to 1 decimal place).
@@ -990,7 +907,7 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
 
         // Highlight actively processing file rows blue
         if (status == "Processing") {
-            for (int col = 0; col < 6; ++col) {
+            for (int col = 0; col < m_tableQueue->columnCount(); ++col) {
                 QTableWidgetItem *item = m_tableQueue->item(idx, col);
                 if (item) {
                     item->setBackground(Qt::darkBlue);
@@ -1013,10 +930,10 @@ void MainWindow::updateStatus(const QString &filepath, const QString &status, co
 // Called when a worker finishes transcoding. Handles database recordings and grid table color codes.
 void MainWindow::fileDone(const QString &filepath, const QString &status, qint64 oldSize, qint64 newSize)
 {
+    Q_UNUSED(oldSize);
     int idx = findRowByFilepath(filepath);
     if (idx != -1) {
         m_tableQueue->setItem(idx, 1, new QTableWidgetItem(status));
-        m_tableQueue->setItem(idx, 4, new QTableWidgetItem("Finished"));
         
         double newSizeMb = static_cast<double>(newSize) / (1024.0 * 1024.0);
         m_tableQueue->setItem(idx, 3, new QTableWidgetItem(QString("%1 MB").arg(QString::number(newSizeMb, 'f', 1))));
@@ -1033,7 +950,7 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
             color = Qt::darkGray;
         }
 
-        for (int col = 0; col < 6; ++col) {
+        for (int col = 0; col < m_tableQueue->columnCount(); ++col) {
             QTableWidgetItem *item = m_tableQueue->item(idx, col);
             if (item) {
                 item->setBackground(color);
@@ -1053,13 +970,19 @@ void MainWindow::fileDone(const QString &filepath, const QString &status, qint64
 // Cleans up panels and unlocks sidebar input controls when all queued transcoding files are completed.
 void MainWindow::processingFinished()
 {
-    logMessage("\nAll transcode queue tasks finished.");
+    logMessage(m_stopping ? "Queue stopped." : "All transcode queue tasks finished.");
+    m_isQueueRunning = false;
+    m_stopping = false;
+    m_actNvenc->setEnabled(true);
+    m_actAvisynth->setEnabled(true);
+    m_actClearQueue->setEnabled(true);
+    m_actConcurrency->setEnabled(true);
     // Enable menu actions again (keep parent menus enabled, unlock individual items)
     m_actOpen->setEnabled(true);
     m_actScan->setEnabled(true);
     m_actExit->setEnabled(true);
-    m_actCrf->setEnabled(true);
-    m_menuPreset->setEnabled(true);
+    m_actCrf->setEnabled(!m_nvenc);
+    m_menuPreset->setEnabled(!m_nvenc);
     m_actDownscale->setEnabled(true);
     m_actDebob->setEnabled(true);
     m_actResetConfig->setEnabled(true);
@@ -1088,7 +1011,8 @@ void MainWindow::updateStartButtonState()
         }
     }
     // Enable start button only if files remain to be processed
-    m_btnStart->setEnabled(m_activeTranscodeQueue.count() > 0);
+    m_btnStart->setEnabled(!m_scanWorker && !m_isQueueRunning && m_workers.isEmpty() && !m_activeTranscodeQueue.isEmpty());
+    updateAvisynthSummary();
 }
 
 // Queries workspace statistics from database and updates GUI scoreboard labels.
@@ -1197,9 +1121,12 @@ void MainWindow::showTableContextMenu(const QPoint &pos)
 
     QMenu menu(this);
     QAction *playAction = menu.addAction("Play Video");
+    QAction *avsAction = menu.addAction("AviSynth cleanup…");
+    avsAction->setEnabled(!m_scanWorker && !m_isQueueRunning && m_workers.isEmpty());
 
     // Display context menu at mouse cursor screen coordinates
     QAction *selected = menu.exec(m_tableQueue->viewport()->mapToGlobal(pos));
+    if (selected == avsAction) { configureAvisynth(); return; }
     if (selected == playAction) {
         // Opens the video asynchronously using the host OS's default media player
         QDesktopServices::openUrl(QUrl::fromLocalFile(playPath));
@@ -1229,11 +1156,6 @@ void MainWindow::onTogglePreviewSelected(bool checked)
     m_livePreviewEnabled = checked; // Store the toggle state
     m_viewfinderGroup->setVisible(checked); // Show or hide the viewfinder widget box in the sidebar
 
-    // Propagate the new preview status to all actively running background compression threads
-    for (TranscodeWorker *worker : m_workers) {
-        worker->setLivePreviewEnabled(checked);
-    }
-    
     // If the user turned off live previews, reset the viewfinder layout back to its idle standby state
     if (!checked) {
         m_viewfinderFocusedFile = ""; // Forget whichever file was being inspected
@@ -1256,6 +1178,13 @@ void MainWindow::onTogglePreviewSelected(bool checked)
             onQueueTableSelectionChanged();
         }
     }
+    updateWorkerPreviewSelection();
+}
+
+void MainWindow::updateWorkerPreviewSelection()
+{
+    for (auto *worker : m_workers)
+        worker->setLivePreviewEnabled(m_livePreviewEnabled && worker->property("filepath").toString() == m_viewfinderFocusedFile);
 }
 
 // Called when the user clicks "Transcode Quality (CRF)..." in the Options menu.
@@ -1271,6 +1200,7 @@ void MainWindow::onCrfSelected()
         m_crf = val; // Store the new quality setting
         updateConfigSummaryText(); // Update the sidebar summary text label
         logMessage(QString("Transcode CRF quality set to: %1").arg(m_crf));
+        refreshScanForSettings();
     }
 }
 
@@ -1282,6 +1212,7 @@ void MainWindow::onPresetSelected(QAction *action)
         m_preset = action->text(); // Extract the speed text (e.g., "fast", "slow") from the menu item
         updateConfigSummaryText(); // Redraw the sidebar config text label
         logMessage(QString("CPU speed preset set to: %1").arg(m_preset));
+        refreshScanForSettings();
     }
 }
 
@@ -1294,12 +1225,18 @@ void MainWindow::onConcurrencySelected()
     int val = QInputDialog::getInt(this, "Set Concurrency",
                                    "Max concurrent transcode processes:",
                                    m_concurrentLimit, 1, 16, 1, &ok);
-    if (ok) {
-        m_concurrentLimit = val; // Update the concurrent limit value
-        updateConfigSummaryText(); // Redraw the sidebar config text label
-        onConcurrentChanged(m_concurrentLimit); // Adjust slots on the fly if queue is currently active
-        logMessage(QString("Max concurrent slots set to: %1").arg(m_concurrentLimit));
-    }
+    if (ok) setConcurrencyLimit(val);
+}
+
+void MainWindow::setConcurrencyLimit(int limit)
+{
+    m_concurrentLimit = qBound(1, limit, 16);
+    updateConfigSummaryText();
+    logMessage(QString("Max concurrent slots set to: %1").arg(m_concurrentLimit));
+    // Raising the limit fills available slots immediately. Lowering it lets
+    // existing workers finish; the completion handler observes the new limit.
+    for (int slot = m_workers.size(); slot < m_concurrentLimit; ++slot)
+        startNextQueueJob();
 }
 
 // Called when the user toggles "Downscale 4K/UHD to 1080p" in the Options menu.
@@ -1308,6 +1245,7 @@ void MainWindow::onDownscaleToggled(bool checked)
     m_downscale = checked; // Store checked status
     updateConfigSummaryText(); // Redraw the sidebar config text label
     logMessage(QString("Downscale 4K to 1080p set to: %1").arg(m_downscale ? "ON" : "OFF"));
+    refreshScanForSettings();
 }
 
 // Called when the user toggles "High frame-rate de-bob (bwdif)" in the Options menu.
@@ -1316,6 +1254,22 @@ void MainWindow::onDebobToggled(bool checked)
     m_debob = checked; // Store checked status
     updateConfigSummaryText(); // Redraw the sidebar config text label
     logMessage(QString("High frame-rate de-bob set to: %1").arg(m_debob ? "ON" : "OFF"));
+    refreshScanForSettings();
+}
+
+void MainWindow::onNvencToggled(bool checked)
+{
+    if (m_scanWorker || m_isQueueRunning || !m_workers.isEmpty()) {
+        const QSignalBlocker blocker(m_actNvenc);
+        m_actNvenc->setChecked(m_nvenc);
+        return;
+    }
+    m_nvenc = checked;
+    m_actCrf->setEnabled(!checked);
+    m_menuPreset->setEnabled(!checked);
+    updateConfigSummaryText();
+    logMessage(checked ? "Video encoder: NVIDIA NVENC (fixed settings)." : "Video encoder: CPU x265.");
+    // Backend selection does not change eligibility or invalidate batch filters.
 }
 
 // Called when the user clicks "Restore settings to defaults" in the Options menu.
@@ -1336,6 +1290,7 @@ void MainWindow::onUsageGuideSelected()
         "<p><b>1. Select Workspace:</b> Go to File &gt; Open Workspace Folder to choose a directory containing your video files.</p>"
         "<p><b>2. Scan Workspace:</b> Click the 'Scan Directory' button (or File &gt; Scan Directory) to index all video files. The status list will color-code files that are already completed (green) or already compliant (yellow).</p>"
         "<p><b>3. Adjust Configurations:</b> Open the 'Options' menu to set target CRF quality, CPU speed preset, UHD downscaling, deinterlace bobbing, or max concurrent slots.</p>"
+        "<p><b>Optional hardware encoding:</b> Advanced &gt; Use NVIDIA hardware encoding enables faster encoding with fixed settings. It requires a compatible NVIDIA GPU, driver, and FFmpeg. CPU quality and preset controls apply when hardware encoding is off.</p>"
         "<p><b>4. Start Queue:</b> Click 'Start Queue' in the sidebar to begin shrinking videos. Active progress indicators will stack vertically.</p>"
         "<p><b>5. Live Previews:</b> Enable View &gt; Show Live Preview. Select any actively-transcoding row in the table to display its live frame monitor in the sidebar viewfinder.</p>");
     msgBox.exec();
@@ -1353,7 +1308,7 @@ void MainWindow::onAboutSelected()
     msgBox.setTextFormat(Qt::RichText);
     msgBox.setIcon(QMessageBox::Information);
     msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.3</h3>"
-                           "<p>A multi-process, GPU-friendly video compressor interface written in C++ and Qt6.</p>"
+                           "<p>A video compressor interface written in C++ and Qt6.</p>"
                            "<p><b>Dependencies Status:</b><br/>"
                            "• FFmpeg: %1<br/>"
                            "• FFprobe: %2</p>"
@@ -1381,7 +1336,8 @@ void MainWindow::onViewfinderDataAvailable()
 void MainWindow::onViewfinderProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     // Make sure process exited normally without crash errors
-    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+    if (exitStatus == QProcess::NormalExit && exitCode == 0 && m_livePreviewEnabled
+        && m_viewfinderProcess->property("previewFile").toString() == m_viewfinderFocusedFile) {
         if (m_viewfinderProcess) {
             // Read any leftover trailing bytes from stdout
             m_viewfinderBuffer.append(m_viewfinderProcess->readAllStandardOutput());
@@ -1411,6 +1367,7 @@ void MainWindow::onQueueTableSelectionChanged()
         m_lblViewfinderTime->setText("Current Time: N/A");
         m_lblViewfinder->clear();
         m_lblViewfinder->setText("Standby / Select active encode");
+        updateWorkerPreviewSelection();
         return;
     }
 
@@ -1425,6 +1382,7 @@ void MainWindow::onQueueTableSelectionChanged()
 
     // If the highlighted video file is actively processing, point the viewfinder focus at it
     if (status == "Processing" && m_activeCards.contains(filepath)) {
+        if (m_viewfinderFocusedFile != filepath) m_lblViewfinder->clear();
         m_viewfinderFocusedFile = filepath;
         m_lblViewfinderStatus->setText(QString("Now Viewing: %1").arg(QFileInfo(filepath).fileName()));
         
@@ -1443,6 +1401,7 @@ void MainWindow::onQueueTableSelectionChanged()
         m_lblViewfinder->clear();
         m_lblViewfinder->setText("Standby / Select active encode");
     }
+    updateWorkerPreviewSelection();
 }
 
 // Dispatches a seek execution command running FFmpeg asynchronously to pull one frame.
@@ -1450,6 +1409,11 @@ void MainWindow::onQueueTableSelectionChanged()
 void MainWindow::updateViewfinderFrame(const QString &filepath, double secs)
 {
     if (!m_livePreviewEnabled) return; // Skip if live previews are disabled
+    if (m_filterAssignments.contains(filepath)) {
+        if (m_lblViewfinder->pixmap().isNull())
+            m_lblViewfinder->setText("Waiting for encoded frames…");
+        return;
+    }
 
     // Ignore request if the viewfinder's FFmpeg process is currently busy seeking the last frame
     if (m_viewfinderProcess && m_viewfinderProcess->state() != QProcess::NotRunning) {
@@ -1458,6 +1422,12 @@ void MainWindow::updateViewfinderFrame(const QString &filepath, double secs)
 
     QString ffmpeg = findDependency("ffmpeg");
     if (ffmpeg.isEmpty()) return; // Abort if FFmpeg dependency is missing
+
+    int videoIndex = -1;
+    for (const auto &file : m_scannedFiles) {
+        if (file.absolutePath == filepath) { videoIndex = file.metadata.videoIndex; break; }
+    }
+    if (videoIndex < 0) return;
 
     m_viewfinderBuffer.clear(); // Empty the previous image buffer
 
@@ -1480,10 +1450,13 @@ void MainWindow::updateViewfinderFrame(const QString &filepath, double secs)
 
     // Dispatch FFmpeg subprocess to extract exactly 1 frame at the target time
     // Normalizes to square pixels using iw*sar:ih, scales picture width to 240px, and pipes binary PNG output to stdout.
+    m_viewfinderProcess->setProperty("previewFile", filepath);
     m_viewfinderProcess->start(ffmpeg, {
         "-y",
         "-ss", timeStr,
         "-i", filepath,
+        "-map", QString("0:%1").arg(videoIndex),
+        "-an", "-sn", "-dn",
         "-vf", "scale=iw*sar:ih,scale=240:-1",
         "-frames:v", "1",
         "-f", "image2pipe",
@@ -1516,10 +1489,103 @@ void MainWindow::autoSelectActiveRow()
         QTableWidgetItem *statusItem = m_tableQueue->item(row, 1);
         if (statusItem && statusItem->text() == "Processing") {
             m_tableQueue->selectRow(row); // Select the active row
+            onQueueTableSelectionChanged(); // Also focus a row already selected before Start.
             return;
         }
     }
 
     // If no active transcode is found, clear selection (viewfinder returns to standby)
     m_tableQueue->clearSelection();
+}
+
+QVariantMap MainWindow::currentEncodeSettings() const
+{
+    return {{"crf", m_crf}, {"preset", m_preset}, {"nvenc", m_nvenc}, {"downscale", m_downscale}, {"debob", m_debob},
+        {"live_preview", m_livePreviewEnabled}, {"threads", qMax(1, QThread::idealThreadCount() / qMax(1, m_concurrentLimit))}};
+}
+
+void MainWindow::updateAvisynthSummary()
+{
+    if (!m_lblAvisynthSummary) return;
+    int count = 0;
+    for (const auto &path : m_activeTranscodeQueue) if (m_filterAssignments.contains(path)) ++count;
+    m_lblAvisynthSummary->setText(count == 0 ? "AviSynth: OFF for queued files"
+        : QString("AviSynth: ON for %1 queued file(s)\nCurrent batch only").arg(count));
+    m_lblAvisynthSummary->setStyleSheet(count == 0 ? QString() : "font-weight: bold; color: #d88400;");
+}
+
+void MainWindow::assignAvisynth(const QStringList &paths, const AvisynthProfile &profile, bool remove)
+{
+    if (m_scanWorker || m_isQueueRunning || !m_workers.isEmpty()) return;
+    for (const auto &path : paths) {
+        const int row = findRowByFilepath(path);
+        if (row < 0) continue;
+        if (remove) {
+            if (!m_filterAssignments.contains(path)) continue;
+            const auto previous = m_filterAssignments.take(path);
+            // A completed output must not be fed back through the old source assignment.
+            if (m_tableQueue->item(row, 1)->text() != "Completed") {
+                updateStatus(path, previous.previousStatus, previous.previousDetail);
+            }
+            m_tableQueue->setItem(row, 6, new QTableWidgetItem("Off"));
+        } else {
+            QFileInfo file(path);
+            if (!file.isFile() || file.isSymLink()) {
+                logMessage("Rescan before assigning a profile to a completed or changed source: " + path); continue;
+            }
+            FilterAssignment assignment;
+            if (m_filterAssignments.contains(path)) assignment = m_filterAssignments.value(path);
+            else {
+                assignment.previousStatus = m_tableQueue->item(row, 1)->text();
+                assignment.previousDetail = m_tableQueue->item(row, 4)->text();
+            }
+            assignment.profile = profile;
+            assignment.sourceSize = file.size();
+            assignment.sourceModified = file.lastModified().toMSecsSinceEpoch();
+            m_filterAssignments.insert(path, assignment);
+            updateStatus(path, "Pending", "AviSynth cleanup: " + profile.name);
+            m_tableQueue->setItem(row, 6, new QTableWidgetItem(profile.name));
+        }
+    }
+    updateStartButtonState();
+}
+
+void MainWindow::clearAvisynthAssignments()
+{
+    assignAvisynth(m_filterAssignments.keys(), {}, true);
+    m_filterAssignments.clear();
+    m_avisynthTools.clear();
+    updateAvisynthSummary();
+}
+
+void MainWindow::clearQueue()
+{
+    if (m_scanWorker || m_isQueueRunning || !m_workers.isEmpty()) return;
+    clearAvisynthAssignments();
+    m_tableQueue->setRowCount(0);
+    m_scannedFiles.clear(); m_activeTranscodeQueue.clear(); m_pendingQueue.clear();
+    updateStartButtonState();
+    statusBar()->showMessage("Queue cleared. AviSynth filtering is off.");
+}
+
+void MainWindow::configureAvisynth()
+{
+    if (m_scanWorker || m_isQueueRunning || !m_workers.isEmpty() || m_tableQueue->rowCount() == 0) return;
+    QStringList selected;
+    for (const auto &index : m_tableQueue->selectionModel()->selectedRows())
+        selected.append(QDir(m_rootDir).filePath(m_tableQueue->item(index.row(), 5)->text()));
+    int current = m_tableQueue->currentRow();
+    if (current < 0) current = 0;
+    const QString source = QDir(m_rootDir).filePath(m_tableQueue->item(current, 5)->text());
+    if (selected.isEmpty()) selected.append(source);
+    auto settings = currentEncodeSettings();
+    for (auto it = m_avisynthTools.cbegin(); it != m_avisynthTools.cend(); ++it) settings.insert(it.key(), it.value());
+    AvisynthDialog dialog(source, m_filterAssignments.value(source).profile, selected.size(), m_activeTranscodeQueue.size(), settings, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    QStringList targets;
+    if (dialog.scope() == AvisynthDialog::ThisFile) targets.append(source);
+    else if (dialog.scope() == AvisynthDialog::SelectedFiles) targets = selected;
+    else targets = dialog.removeProfile() ? m_filterAssignments.keys() : m_activeTranscodeQueue;
+    m_avisynthTools = dialog.toolSettings();
+    assignAvisynth(targets, dialog.profile(), dialog.removeProfile());
 }

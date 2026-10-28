@@ -18,23 +18,8 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 
 [Files]
-; Main Executable and Icon
-Source: "build\hevc_shrinker.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\app_icon.png"; DestDir: "{app}"; Flags: ignoreversion
-
-; Deployed Qt & MinGW DLLs
-Source: "build\*.dll"; DestDir: "{app}"; Flags: ignoreversion
-
-; Deployed Dependency Directories (recursively)
-Source: "build\platforms\*"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "build\sqldrivers\*"; DestDir: "{app}\sqldrivers"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "build\imageformats\*"; DestDir: "{app}\imageformats"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "build\styles\*"; DestDir: "{app}\styles"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "build\translations\*"; DestDir: "{app}\translations"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; Optional: Include FFmpeg and FFprobe inside the installer if they are placed in the build folder
-Source: "build\ffmpeg.exe"; DestDir: "{app}"; Flags: skipifsourcedoesntexist ignoreversion
-Source: "build\ffprobe.exe"; DestDir: "{app}"; Flags: skipifsourcedoesntexist ignoreversion
+; Run package_portable.py first; both distributions use the same deployed runtime.
+Source: "deploy\windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

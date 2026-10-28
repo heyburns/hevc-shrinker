@@ -1,899 +1,403 @@
 #include "transcodeworker.h"
 #include "databasemanager.h"
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
-#include <QRegularExpression>
-#include <QCryptographicHash>
-#include <QStandardPaths>
-#include <QCoreApplication>
+#include "filetransaction.h"
+#include "avisynthpipeline.h"
+#include "videoencoder.h"
 #include <QDateTime>
-#include <QDebug>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <cmath>
+#include <limits>
 
-// Helper function to safely move files across different disk volumes or filesystems.
-// Under Linux, rename() fails if target is on a different mount point (e.g. SSD to HDD share).
-// This function falls back to copy-then-delete if standard rename fails.
-static bool safeMove(const QString &src, const QString &dest) {
-    if (QFile::rename(src, dest)) return true;
-    if (QFile::copy(src, dest)) {
-        return QFile::remove(src);
+namespace {
+enum class Interlace { Unknown, Progressive, Interlaced };
+
+Interlace probeInterlaced(const QString &file, const QString &ffmpeg, const VideoMetadata &meta, const std::atomic_bool *cancel)
+{
+    // Sample long videos beyond opening credits without decoding more frames.
+    const QList<double> positions = meta.duration >= 60.0 ? QList<double>{0.0, meta.duration / 3.0, meta.duration * 2.0 / 3.0}
+                                                        : QList<double>{0.0};
+    bool allProgressive = true;
+    static const QRegularExpression pattern("Multi frame detection:\\s*TFF:\\s*(\\d+)\\s*BFF:\\s*(\\d+)\\s*Progressive:\\s*(\\d+)");
+    for (double position : positions) {
+        auto result = runProcess(ffmpeg, {"-nostdin", "-hide_banner", "-filter_threads", "4", "-ss", QString::number(position, 'f', 3), "-i", file,
+            "-map", QString("0:%1").arg(meta.videoIndex), "-vf", "idet", "-frames:v", QString::number(360 / positions.size()),
+            "-an", "-f", "null", "-"}, cancel);
+        if (!result.ok) return Interlace::Unknown;
+        auto matches = pattern.globalMatch(QString::fromUtf8(result.diagnostics));
+        QRegularExpressionMatch match;
+        while (matches.hasNext()) match = matches.next();
+        if (!match.hasMatch()) return Interlace::Unknown;
+        const int interlaced = match.captured(1).toInt() + match.captured(2).toInt();
+        const int progressive = match.captured(3).toInt();
+        if (interlaced + progressive < 20) { allProgressive = false; continue; }
+        if (interlaced > progressive * 2) return Interlace::Interlaced;
+        if (progressive <= interlaced * 2) allProgressive = false;
     }
-    return false;
+    return allProgressive ? Interlace::Progressive : Interlace::Unknown;
 }
 
-// Searches for executable dependencies (like ffmpeg/ffprobe) on the host system.
-// Checks the system PATH first, then falls back to check the directory where this application runs.
-QString findDependency(const QString &name) {
-    QString path = QStandardPaths::findExecutable(name);
-    if (!path.isEmpty()) return path;
-
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString localPath = appDir + "/" + name;
-#ifdef Q_OS_WIN
-    localPath += ".exe"; // Append suffix on Windows
-#endif
-    if (QFile::exists(localPath)) return localPath;
-
-#ifdef Q_OS_MAC
-    // On macOS, check inside the app bundle's Resources directory as well
-    QString macResourcesPath = appDir + "/../Resources/" + name;
-    if (QFile::exists(macResourcesPath)) return macResourcesPath;
-#endif
-
-    return ""; // Not found
+int streamCount(const VideoMetadata &meta, const QString &type)
+{
+    int count = 0;
+    for (const auto &stream : meta.streams) if (stream.type == type) ++count;
+    return count;
 }
 
-// Generates a quick cryptographic hash from the first 4MB of the video file.
-// Used as a unique signature to record and verify sizing history in the database.
-QString computeFastHash(const QString &filepath) {
-    QFile file(filepath);
-    if (!file.open(QIODevice::ReadOnly)) return "";
-    QCryptographicHash hash(QCryptographicHash::Sha1);
-    QByteArray chunk = file.read(4 * 1024 * 1024); // Read first 4MB
-    hash.addData(chunk);
-    return QString(hash.result().toHex());
-}
-
-// Probes a video file using FFprobe to check if it is already compliant (HEVC/H.265 video + AAC audio).
-// Non-compliant files require transcoding.
-bool probeFileCompliance(const QString &filepath, const QString &ffprobeBin) {
-    QFileInfo fi(filepath);
-    // Standard library format mandates Matroska (.mkv) container
-    if (fi.suffix().toLower() != "mkv") return false;
-
-    QProcess proc;
-    // Launch FFprobe requesting json output representing codecs
-    proc.start(ffprobeBin, {
-        "-v", "error",
-        "-show_entries", "stream=codec_name",
-        "-of", "json",
-        filepath
-    });
-    if (proc.waitForFinished()) {
-        QByteArray out = proc.readAllStandardOutput();
-        QJsonDocument doc = QJsonDocument::fromJson(out);
-        if (!doc.isNull() && doc.isObject()) {
-            QJsonObject obj = doc.object();
-            QJsonArray streams = obj["streams"].toArray();
-            bool hasHevc = false;
-            bool hasAac = false;
-            // Iterate through audio/video streams to inspect their codecs
-            for (const QJsonValue &val : streams) {
-                QString codec = val.toObject()["codec_name"].toString().toLower();
-                if (codec == "hevc") hasHevc = true;
-                if (codec == "aac") hasAac = true;
-            }
-            // Fully compliant if container is .mkv and contains both HEVC and AAC streams
-            return (hasHevc && hasAac);
-        }
+QString validateOutput(const VideoMetadata &source, const VideoMetadata &output,
+    bool videoEncoded, const VideoGeometry &geometry, bool fallback)
+{
+    if (!output.valid) return "Output probe failed: " + output.error;
+    const double tolerance = source.fps > 0 ? qBound(0.25, 3.0 / source.fps, 2.0) : 0.5;
+    if (qAbs(source.duration - output.duration) > tolerance)
+        return "Output duration does not match the source; original retained.";
+    for (const QString &type : {QString("video"), QString("audio"), QString("subtitle"), QString("attachment")})
+        if (streamCount(source, type) != streamCount(output, type))
+            return "Output " + type + " stream count does not match; original retained.";
+    if (videoEncoded) {
+        if (output.vcodec != "hevc" || output.width != geometry.width || output.height != geometry.height)
+            return "Output codec or dimensions do not match the planned video.";
+        if (qAbs(output.rotation) > 0.01) return "Unexpected output rotation; original retained.";
+        if (geometry.scale && output.sampleAspectRatio != "1:1")
+            return "Unexpected output pixel aspect ratio; original retained.";
     }
-    return false;
-}
-
-// Checks if the host's FFmpeg binary has the high-quality Fraunhofer AAC encoder (libfdk_aac) compiled in.
-static bool detectFdkAac(const QString &ffmpegBin) {
-    QProcess proc;
-    proc.start(ffmpegBin, {"-encoders"});
-    if (proc.waitForFinished()) {
-        QString out = QString::fromUtf8(proc.readAllStandardOutput());
-        return out.contains("libfdk_aac"); // True if fdk is present
+    else if (output.vcodec != source.vcodec || output.width != source.width || output.height != source.height)
+        return "Copied video does not match the source; original retained.";
+    if (!fallback) {
+        for (const auto &stream : output.streams)
+            if (stream.type == "audio" && stream.codec != "aac") return "Output audio conversion was incomplete.";
     }
-    return false;
+    return {};
+}
 }
 
-// Parses JSON information returned by FFprobe to extract duration, codecs, sizes, and frames.
-VideoMetadata probeMetadata(const QString &filepath, const QString &ffprobeBin) {
-    VideoMetadata meta;
-    QProcess proc;
-    proc.start(ffprobeBin, {
-        "-v", "error",
-        "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,avg_frame_rate,field_order,display_aspect_ratio,sample_aspect_ratio",
-        "-of", "json",
-        filepath
-    });
-    if (proc.waitForFinished()) {
-        QJsonDocument doc = QJsonDocument::fromJson(proc.readAllStandardOutput());
-        QJsonObject root = doc.object();
-        
-        if (root.contains("format")) {
-            meta.duration = root["format"].toObject()["duration"].toString().toDouble();
-        }
-        
-        if (root.contains("streams")) {
-            QJsonArray streams = root["streams"].toArray();
-            for (const QJsonValue &val : streams) {
-                QJsonObject s = val.toObject();
-                QString type = s["codec_type"].toString().toLower();
-                if (type == "video") {
-                    meta.vcodec = s["codec_name"].toString().toLower();
-                    meta.width = s["width"].toInt();
-                    meta.height = s["height"].toInt();
-                    meta.fieldOrder = s["field_order"].toString().toLower();
-                    meta.displayAspectRatio = s["display_aspect_ratio"].toString();
-                    meta.sampleAspectRatio = s["sample_aspect_ratio"].toString();
-                    
-                    // Framerates are returned as fractions (e.g. "30000/1001"). Parse them.
-                    QString fpsStr = s["avg_frame_rate"].toString();
-                    if (fpsStr.contains("/")) {
-                        QStringList parts = fpsStr.split("/");
-                        if (parts.size() == 2) {
-                            double num = parts[0].toDouble();
-                            double den = parts[1].toDouble();
-                            if (den != 0.0) {
-                                meta.fps = num / den;
-                            }
-                        }
-                    }
-                } else if (type == "audio") {
-                    // Extract the first audio stream codec
-                    if (!meta.hasAudio) {
-                        meta.acodec = s["codec_name"].toString().toLower();
-                        meta.hasAudio = true;
-                    }
-                }
-            }
-        }
-    }
-    return meta;
-}
-
-// Analytically evaluates if a video contains interlaced frames.
-// Runs FFmpeg's 'idet' filter for 360 frames (about 12–15 seconds) to determine if
-// interlacing characteristics exist.
-static bool probeInterlaced(const QString &filepath, const QString &ffmpegBin) {
-    QProcess proc;
-    proc.start(ffmpegBin, {
-        "-filter_threads", "4",
-        "-i", filepath,
-        "-filter:v", "idet", // Interlace detection filter
-        "-frames:v", "360", // Probe first 360 frames
-        "-an", // No audio decoding
-        "-f", "null", // Null muxer (discard output)
-        "-"
-    });
-    if (proc.waitForFinished()) {
-        QString err = QString::fromUtf8(proc.readAllStandardError());
-        // Parse the Multi-frame detection summary line
-        QRegularExpression re("Multi frame detection:\\s*TFF:\\s*(\\d+)\\s*BFF:\\s*(\\d+)\\s*Progressive:\\s*(\\d+)");
-        QRegularExpressionMatch match = re.match(err);
-        if (match.hasMatch()) {
-            int tff = match.captured(1).toInt(); // Top Field First frames
-            int bff = match.captured(2).toInt(); // Bottom Field First frames
-            int prog = match.captured(3).toInt(); // Progressive frames
-            int interlaced = tff + bff;
-            // Heuristic: If interlaced frames are more than double the progressive frames,
-            // the video is classified as interlaced.
-            if (interlaced > prog * 2) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Constructor: Initializes members and thread control variables.
-TranscodeWorker::TranscodeWorker(const QStringList &fileQueue, const QString &rootDir, const QString &dbPath, const QVariantMap &settings, QObject *parent)
-    : QThread(parent)
-    , m_fileQueue(fileQueue)
-    , m_rootDir(rootDir)
-    , m_dbPath(dbPath)
-    , m_settings(settings)
-    , m_isRunning(false)
-    , m_livePreviewEnabled(false)
-    , m_activeProcess(nullptr)
-    , m_hasFdk(false)
+TranscodeWorker::TranscodeWorker(const QStringList &files, const QString &root, const QString &dbPath,
+    const QVariantMap &settings, QObject *parent)
+    : QThread(parent), m_fileQueue(files), m_rootDir(root), m_dbPath(dbPath), m_settings(settings)
 {
     m_livePreviewEnabled = settings.value("live_preview", false).toBool();
 }
 
-// Destructor: Safely stops execution and cleans up process handles.
 TranscodeWorker::~TranscodeWorker()
 {
     stop();
+    wait();
 }
 
-// Thread-safe request to stop processing files in the queue.
-void TranscodeWorker::stop()
+void TranscodeWorker::stop() { m_cancelled = true; }
+void TranscodeWorker::setLivePreviewEnabled(bool enabled) { m_livePreviewEnabled = enabled; }
+
+void TranscodeWorker::finishFile(const QString &file, const QString &status, const QString &details,
+    qint64 oldSize, qint64 newSize)
 {
-    m_isRunning = false;
+    emit logSignal(QString("[%1] %2: %3").arg(status, QFileInfo(file).fileName(), details));
+    emit statusSignal(file, status, details);
+    emit fileDoneSignal(file, status, oldSize, newSize);
 }
 
-// Dynamic control of live progress preview generation.
-void TranscodeWorker::setLivePreviewEnabled(bool enabled)
-{
-    m_livePreviewEnabled = enabled;
-}
-
-// Core execution method running inside the background thread.
 void TranscodeWorker::run()
 {
-    m_isRunning = true;
-    QString ffmpegBin = findDependency("ffmpeg");
-    QString ffprobeBin = findDependency("ffprobe");
-
-    // Abort if dependencies are not found on the host system
-    if (ffmpegBin.isEmpty() || ffprobeBin.isEmpty()) {
-        emit logSignal("[ERROR] ffmpeg or ffprobe dependency is missing. Cannot process.");
-        emit finishedSignal();
-        return;
-    }
-
-    // Set up trash and error directories inside the active workspace
-    QString trashDir = QDir(m_rootDir).filePath(".Trash");
-    QString errorDir = QDir(m_rootDir).filePath(".Errors");
-
-    // Detect if Fraunhofer AAC is supported by this FFmpeg binary
-    m_hasFdk = detectFdkAac(ffmpegBin);
-    emit logSignal(QString("[NOTICE] Audio encoder: %1").arg(m_hasFdk ? "libfdk_aac (preferred)" : "aac (native fallback)"));
-
-    // Loop through files in the queue
-    for (const QString &filepath : m_fileQueue) {
-        if (!m_isRunning) break; // User requested abort
-
-        try {
-            processFile(filepath, ffmpegBin, ffprobeBin, trashDir, errorDir);
-        } catch (const std::exception &e) {
-            emit logSignal(QString("[ERROR] Exception processing %1: %2").arg(QFileInfo(filepath).fileName(), e.what()));
-            moveToErrors(filepath, errorDir);
-            emit statusSignal(filepath, "Error", "Critical exception");
+    const QString ffmpeg = m_settings.value("ffmpeg", findDependency("ffmpeg")).toString();
+    const QString ffprobe = m_settings.value("ffprobe", findDependency("ffprobe")).toString();
+    for (const auto &file : m_fileQueue) {
+        if (m_cancelled) {
+            finishFile(file, "Cancelled", "Cancelled; original retained.", QFileInfo(file).size(), 0);
+            continue;
+        }
+        if (ffmpeg.isEmpty() || ffprobe.isEmpty()) {
+            finishFile(file, "Failed", "FFmpeg or FFprobe is missing; original retained.", QFileInfo(file).size(), 0);
+            continue;
+        }
+        try { processFile(file, ffmpeg, ffprobe); }
+        catch (const std::exception &error) {
+            finishFile(file, "Failed", QString::fromUtf8(error.what()), QFileInfo(file).size(), 0);
         }
     }
-
-    emit finishedSignal(); // Signal parent thread that worker is done
 }
 
-// Main execution method that controls the transcode pipeline for a single file.
-bool TranscodeWorker::processFile(const QString &filepath, const QString &ffmpegBin, const QString &ffprobeBin, const QString &trashDir, const QString &errorDir)
+bool TranscodeWorker::processFile(const QString &file, const QString &ffmpeg, const QString &ffprobe)
 {
-    QFileInfo fileInfo(filepath);
-    QString baseName = fileInfo.fileName();
-    QString baseNoExt = fileInfo.completeBaseName();
-    QString fileDir = fileInfo.absolutePath();
-
-    emit logSignal(QString("\n[START] Processing file: %1").arg(baseName));
-    emit statusSignal(filepath, "Processing", "Preparing...");
-
-    // 1. Calculate the file signature (Fast Hash) to detect if we processed it before
-    QString fileHash = computeFastHash(filepath);
-    if (fileHash.isEmpty()) {
-        emit logSignal("[ERROR] Failed to compute file hash. Skipping.");
-        emit statusSignal(filepath, "Error", "Hash failed");
+    const QFileInfo source(file);
+    const qint64 oldSize = source.size();
+    const qint64 oldModified = source.lastModified().toMSecsSinceEpoch();
+    auto fail = [&](const QString &error) {
+        finishFile(file, m_cancelled ? "Cancelled" : "Failed",
+            m_cancelled ? "Cancelled; original retained." : error, oldSize, 0);
         return false;
-    }
+    };
+    emit statusSignal(file, "Processing", "Analyzing...");
+    FileTransaction transaction(file, m_rootDir);
+    QString error;
+    if (!transaction.prepare(error)) return fail(error);
+    DatabaseManager db(m_dbPath);
+    if (!db.isReady()) return fail("Cannot open processing history: " + db.lastError());
+    const bool useAvisynth = m_settings.value("avs_enabled", false).toBool();
+    if (useAvisynth && (oldSize != m_settings.value("avs_source_size", oldSize).toLongLong()
+        || oldModified != m_settings.value("avs_source_modified", oldModified).toLongLong()))
+        return fail("Source changed since this AviSynth profile was assigned. Rescan and assign it again.");
+    const QString sourceHash = computeFastHash(file);
+    if (sourceHash.isEmpty()) return fail("Cannot read source; original retained.");
+    const VideoMetadata meta = probeMetadata(file, ffprobe, &m_cancelled);
+    if (!meta.valid) return fail(meta.error);
+    if (m_cancelled) return fail({});
 
-    // 2. Query file properties (codecs, frame dimensions, durations) using FFprobe
-    VideoMetadata meta = probeMetadata(filepath, ffprobeBin);
-    if (meta.duration <= 0.0) {
-        emit logSignal("[ERROR] Failed to read video metadata. Skipping.");
-        emit statusSignal(filepath, "Error", "Metadata failed");
-        return false;
+    const int threads = qMax(1, m_settings.value("threads", 1).toInt());
+    std::unique_ptr<AvisynthPipeline> avisynth;
+    if (useAvisynth) {
+        avisynth = std::make_unique<AvisynthPipeline>();
+        emit statusSignal(file, "Processing", "AviSynth: checking timeline, indexing and validating filters...");
+        if (!avisynth->prepare(file, meta, {m_settings.value("avs_name").toString(), m_settings.value("avs_filters").toString()},
+            ffmpeg, ffprobe, threads, &m_cancelled, error, m_settings.value("avs_cache_root").toString())) return fail(error);
+        if (!avisynth->timingDescription().isEmpty()) emit logSignal(avisynth->timingDescription());
     }
-    emit logSignal(QString("Metadata - Video: %1 (%2x%3, %4 fps), Audio: %5, Duration: %6s")
-                   .arg(meta.vcodec,
-                        QString::number(meta.width),
-                        QString::number(meta.height),
-                        QString::number(meta.fps, 'f', 2),
-                        meta.hasAudio ? meta.acodec : "none",
-                        QString::number(meta.duration, 'f', 1)));
+    const Interlace detection = useAvisynth ? Interlace::Progressive : probeInterlaced(file, ffmpeg, meta, &m_cancelled);
+    if (m_cancelled) return fail({});
+    const bool flaggedInterlaced = QStringList{"tt", "bb", "tb", "bt"}.contains(meta.fieldOrder);
+    // An inconclusive probe cannot establish that interlaced metadata is wrong.
+    const bool interlaced = detection == Interlace::Interlaced
+        || (detection == Interlace::Unknown && flaggedInterlaced);
+    if (detection == Interlace::Unknown) emit logSignal("Interlace analysis inconclusive; retaining the metadata decision.");
+    const double effectiveFps = meta.fps * (interlaced ? 2.0 : 1.0);
+    const bool halveFps = !useAvisynth && effectiveFps >= 50.0 && m_settings.value("debob", true).toBool();
+    const auto geometry = useAvisynth ? VideoGeometry{avisynth->filtered.width, avisynth->filtered.height, false}
+        : videoGeometry(meta, m_settings.value("downscale", true).toBool());
+    const bool obsolete = QStringList{"wmv", "flv", "avi", "asf", "f4v", "divx"}.contains(source.suffix().toLower());
+    bool videoEncoded = useAvisynth || meta.vcodec != "hevc" || geometry.scale || interlaced || halveFps
+        || qAbs(meta.rotation) > 0.01 || obsolete;
+    // Do not silently alter HDR/Dolby Vision while no explicit, verified HDR
+    // conversion policy exists. Stream-copy remains available when appropriate.
+    if (videoEncoded && (meta.hdr || meta.dolbyVision))
+        return fail("HDR/Dolby Vision re-encoding is not supported safely; original retained.");
 
-    // 3. Scan the video for interlaced line characteristics using FFmpeg's 'idet' filter
-    bool isInterlaced = probeInterlaced(filepath, ffmpegBin);
-    emit logSignal(QString("Scan results: %1").arg(isInterlaced ? "Interlaced frames detected" : "Progressive scan detected"));
-
-    // Compare scan results with container metadata. If they disagree, log a warning and trust our scan analysis.
-    bool metadataInterlaced = (meta.fieldOrder == "tt" || meta.fieldOrder == "bb" || meta.fieldOrder == "tb" || meta.fieldOrder == "bt");
-    if (metadataInterlaced == isInterlaced) {
-        emit logSignal(QString("Interlace check: Metadata and scan analysis agree (Interlaced: %1).")
-                       .arg(isInterlaced ? "yes" : "no"));
-    } else {
-        if (isInterlaced) {
-            emit logSignal("[NOTICE] Metadata says progressive/unknown, but scan analysis detected interlaced lines. OVERRIDING metadata to deinterlace.");
-        } else {
-            emit logSignal("[NOTICE] Metadata says interlaced, but scan analysis confirmed progressive frames. OVERRIDING metadata to skip deinterlacing.");
-        }
-    }
-
-    // 4. Decide target transcode rules based on compliance logic
-    bool isAlreadyHevc = (meta.vcodec == "hevc");
-    bool isAlreadyAac = (meta.acodec == "aac" || !meta.hasAudio);
-    
-    // If interlaced, a de-bobbing deinterlacer doubles the frame rate
-    double effectiveFps = isInterlaced ? (meta.fps * 2.0) : meta.fps;
-    // We only downsample frame rates (bobbed) if they exceed 50 FPS and the user has enabled it
-    bool bobbed = (effectiveFps >= 50.0 && m_settings["debob"].toBool());
-    
-    // Check if the video is anamorphic (has non-square pixels, where sample_aspect_ratio is not 1:1)
-    double par = 1.0;
-    if (!meta.sampleAspectRatio.isEmpty() && meta.sampleAspectRatio.contains(":")) {
-        QStringList parts = meta.sampleAspectRatio.split(":");
-        if (parts.size() == 2) {
-            double num = parts[0].toDouble();
-            double den = parts[1].toDouble();
-            if (den > 0.0) {
-                par = num / den;
-            }
-        }
-    }
-    
-    // Fallback: If SAR is missing or 1:1, check if container Display Aspect Ratio (DAR) implies anamorphic
-    if (qAbs(par - 1.0) < 0.005 && !meta.displayAspectRatio.isEmpty() && meta.displayAspectRatio.contains(":")) {
-        QStringList parts = meta.displayAspectRatio.split(":");
-        if (parts.size() == 2) {
-            double num = parts[0].toDouble();
-            double den = parts[1].toDouble();
-            if (den > 0.0 && meta.width > 0) {
-                double dar = num / den;
-                double calculatedPar = dar * (static_cast<double>(meta.height) / meta.width);
-                // If container DAR indicates non-square pixels, use the calculated PAR
-                if (qAbs(calculatedPar - 1.0) > 0.01 && calculatedPar > 0.0) {
-                    par = calculatedPar;
-                    emit logSignal(QString("[INFO] Derived Pixel Aspect Ratio (%1) from container Display Aspect Ratio: %2")
-                                   .arg(QString::number(par, 'f', 4))
-                                   .arg(meta.displayAspectRatio));
-                }
-            }
+    QStringList maps{"-map", useAvisynth ? QString("1:v:0") : QString("0:%1").arg(meta.videoIndex)};
+    QStringList subtitleOptions;
+    int subtitleIndex = 0;
+    for (const auto &stream : meta.streams) {
+        if (stream.index == meta.videoIndex) continue;
+        if (!QStringList{"video", "audio", "subtitle", "attachment"}.contains(stream.type)) continue;
+        maps << "-map" << QString("0:%1").arg(stream.index);
+        if (stream.type == "subtitle") {
+            if (stream.codec == "mov_text") subtitleOptions << QString("-c:s:%1").arg(subtitleIndex) << "srt";
+            else if (!QStringList{"subrip", "ass", "ssa", "webvtt", "dvd_subtitle", "hdmv_pgs_subtitle", "dvb_subtitle"}.contains(stream.codec))
+                return fail("Unsupported Matroska subtitle codec: " + stream.codec + "; original retained.");
+            ++subtitleIndex;
         }
     }
-    
-    // Any PAR that isn't 1.0 (or 0.0) indicates anamorphic/non-square pixels
-    bool isAnamorphic = (qAbs(par - 1.0) > 0.005 && par > 0.0);
-
-    int targetWidth = meta.width;
-    int targetHeight = meta.height;
-    bool applyScaleFilter = false;
-
-    if (isAnamorphic) {
-        // Expand/squeeze the width based on the Pixel Aspect Ratio to normalize to square pixels (1:1 PAR)
-        targetWidth = static_cast<int>(qRound(meta.width * par) / 2) * 2;
-        targetHeight = meta.height;
-        applyScaleFilter = true;
-        emit logSignal(QString("[NOTICE] Anamorphic video detected (Pixel Aspect Ratio: %1). Normalizing to square pixels: %2x%3.")
-                       .arg(meta.sampleAspectRatio)
-                       .arg(targetWidth)
-                       .arg(targetHeight));
+    QStringList input{"-hide_banner", "-nostdin", "-y", "-threads", QString::number(threads),
+        "-filter_threads", QString::number(qMax(1, threads / 2)), "-i", file};
+    if (useAvisynth) input << "-xerror" << "-f" << "avisynth" << "-i" << avisynth->scriptPath() << "-copyts";
+    QStringList args = input;
+    args << maps << "-map_metadata" << "0" << "-map_chapters" << "0" << "-c" << "copy" << subtitleOptions;
+    if (videoEncoded) {
+        error = VideoEncoder::validate(ffmpeg, m_settings, &m_cancelled);
+        if (!error.isEmpty()) return fail(error);
+        args << VideoEncoder::arguments(m_settings);
+        QStringList filters;
+        if (interlaced) filters << "bwdif=mode=send_field:parity=-1:deint=all";
+        if (geometry.scale) filters << QString("scale=%1:%2:flags=lanczos,setsar=1").arg(geometry.width).arg(geometry.height);
+        if (halveFps) filters << QString("fps=fps=%1:round=down").arg(effectiveFps / 2.0, 0, 'f', 8);
+        filters << (useAvisynth ? avisynth->videoFilter(true) : "format=" + VideoEncoder::pixelFormat(m_settings));
+        if (useAvisynth && VideoEncoder::isNvenc(m_settings)) filters << "format=" + VideoEncoder::pixelFormat(m_settings);
+        if (useAvisynth) {
+            // Keep sub-frame source offsets and every validated frame intact.
+            args << "-enc_time_base:v:0" << "1:1000000" << "-fps_mode:v:0" << "passthrough"
+                 << avisynth->colorArguments();
+        }
+        args << "-filter:v:0" << filters.join(',');
     }
-
-    // Check if the video dimensions exceed 1080p (1920x1080) and need downscaling
-    bool needsDownscale = false;
-    if (m_settings["downscale"].toBool()) {
-        bool targetIsPortrait = (targetHeight > targetWidth);
-        if (targetIsPortrait) {
-            if (targetWidth > 1080 || targetHeight > 1920) {
-                needsDownscale = true;
-            }
-        } else {
-            if (targetHeight > 1080 || targetWidth > 1920) {
-                needsDownscale = true;
-            }
+    int audioIndex = 0;
+    for (const auto &stream : meta.streams) {
+        if (stream.type != "audio") continue;
+        if (stream.codec != "aac" || (!useAvisynth && obsolete)) {
+            const bool fdk = VideoEncoder::capabilities(ffmpeg, &m_cancelled).output.contains("libfdk_aac");
+            args << QString("-c:a:%1").arg(audioIndex) << (fdk ? "libfdk_aac" : "aac");
+            if (fdk) args << QString("-vbr:a:%1").arg(audioIndex) << "4";
+            else args << QString("-q:a:%1").arg(audioIndex) << "1.5";
         }
+        ++audioIndex;
     }
-
-    if (needsDownscale) {
-        // Downscale to fit within a 1920x1080 bounding box while maintaining DAR (using square pixels)
-        double targetDar = static_cast<double>(targetWidth) / targetHeight;
-        bool targetIsPortrait = (targetHeight > targetWidth);
-        if (targetIsPortrait) {
-            if (targetHeight > 1920) {
-                targetHeight = 1920;
-                targetWidth = static_cast<int>(qRound(targetHeight * targetDar) / 2) * 2;
-            }
-            if (targetWidth > 1080) {
-                targetWidth = 1080;
-                targetHeight = static_cast<int>(qRound(targetWidth / targetDar) / 2) * 2;
-            }
-        } else {
-            if (targetWidth > 1920) {
-                targetWidth = 1920;
-                targetHeight = static_cast<int>(qRound(targetWidth / targetDar) / 2) * 2;
-            }
-            if (targetHeight > 1080) {
-                targetHeight = 1080;
-                targetWidth = static_cast<int>(qRound(targetHeight * targetDar) / 2) * 2;
-            }
-        }
-        applyScaleFilter = true;
+    args << "-metadata" << "title=" + source.completeBaseName();
+    args << "-progress" << "pipe:1" << "-nostats" << transaction.temporaryPath();
+    emit statusSignal(file, "Processing", "Transcoding...");
+    const double outputFps = useAvisynth ? avisynth->filtered.fps : effectiveFps / (halveFps ? 2.0 : 1.0);
+    auto result = encode(ffmpeg, args, meta.duration, file, transaction.temporaryPath(), outputFps);
+    if (useAvisynth && !avisynth->scriptError().isEmpty()) return fail(avisynth->scriptError());
+    if (!result.ok || m_cancelled) return fail(result.error);
+    if (useAvisynth) {
+        error = avisynth->validateEncodedOutput(transaction.temporaryPath(), ffprobe, &m_cancelled);
+        if (!error.isEmpty()) return fail(error);
     }
+    auto output = probeMetadata(transaction.temporaryPath(), ffprobe, &m_cancelled);
+    error = validateOutput(meta, output, videoEncoded, geometry, false);
+    if (!error.isEmpty() || m_cancelled) return fail(error);
+    if (useAvisynth && (qAbs(output.fps - avisynth->filtered.fps) > 0.0001
+        || output.sampleAspectRatio != avisynth->filtered.sampleAspectRatio))
+        return fail("Filtered output frame rate or pixel aspect ratio differs from the validated script.");
 
-    // Check if file is in an obsolete format (e.g. WMV, AVI) which should be fully re-encoded to prevent container stream copy bugs.
-    QString suffix = fileInfo.suffix().toLower();
-    bool isObsoleteFormat = (suffix == "wmv" || suffix == "flv" || suffix == "avi" || suffix == "asf" || suffix == "f4v" || suffix == "divx");
-
-    // Codec target decisions (copy streams if they are already compliant, transcode otherwise)
-    QString wantVideoCodec = (isAlreadyHevc && !applyScaleFilter && !bobbed && !isInterlaced && !isObsoleteFormat) ? "copy" : "libx265";
-    QString wantAudioCodec = (isAlreadyAac && !isObsoleteFormat) ? "copy" : "encode";
-
-    // Create absolute filepath path for the temporary transcoding output file
-    QString tmpOut = QDir(fileDir).filePath(baseNoExt + ".tmp_out.mkv");
-    
-    // 5. Build the command line arguments for the FFmpeg process execution
-    QStringList cmdArgs;
-    int threads = m_settings.value("threads", 0).toInt(); // Fetch thread limits calculated in main window
-    if (threads > 0) {
-        // Enforce dynamic CPU thread partitions to prevent thread over-provisioning and cache thrashing
-        cmdArgs << "-y" << "-threads" << QString::number(threads) << "-filter_threads" << QString::number(qMax(1, threads / 2)) << "-i" << filepath;
-    } else {
-        cmdArgs << "-y" << "-filter_threads" << "4" << "-i" << filepath;
-    }
-
-    // Set up Video arguments
-    if (wantVideoCodec == "copy") {
-        cmdArgs << "-c:v" << "copy"; // Stream copy video (instantaneous, no quality loss)
-    } else {
-        // Build x265 parameters: enforce Main 10 profile (10-bit H.265), disable Sample Adaptive Offset (SAO) for detail retention,
-        // and set thread pools to match our partitioned thread count.
-        QString x265Params = "profile=main10:no-sao=1:selective-sao=0:aq-mode=1:pmode=1:pme=1";
-        if (threads > 0) {
-            x265Params += QString(":pools=%1").arg(threads);
-        }
-
-        // We copy video by default for extra streams (e.g., cover art attachments) but transcode
-        // the main video stream (v:0) to H.265 (libx265)
-        cmdArgs << "-c:v" << "copy"
-                << "-c:v:0" << "libx265"
-                << "-preset" << m_settings["preset"].toString() // ultrafast, medium, veryslow, etc.
-                << "-crf" << QString::number(m_settings["crf"].toInt()) // Constant Rate Factor (quality scale)
-                << "-x265-params" << x265Params;
-
-        // Build video filter pipelines (-filter:v:0)
-        QStringList videoFilters;
-        if (isInterlaced) {
-            // Apply double-framerate de-bob deinterlacer filter
-            videoFilters << "bwdif=mode=send_field:parity=-1:deint=all";
-        }
-        if (applyScaleFilter) {
-            // Apply scale filter to enforce square pixels and target dimensions using high-quality Lanczos scaling
-            videoFilters << QString("scale=%1:%2:flags=lanczos,setsar=1:1").arg(QString::number(targetWidth), QString::number(targetHeight));
-        }
-        if (bobbed) {
-            // Downsample high frame rates back to half (typically 60fps to 30fps)
-            double targetFps = effectiveFps / 2.0;
-            videoFilters << QString("fps=fps=%1:round=down").arg(QString::number(targetFps, 'f', 6));
-        }
-        // Force output color format to high-depth 10-bit YUV 4:2:0
-        videoFilters << "format=yuv420p10le";
-        
-        cmdArgs << "-filter:v:0" << videoFilters.join(",");
-        emit logSignal(QString("Video filters applied (to stream 0:v:0): %1").arg(videoFilters.join(",")));
-    }
-
-    // Set up Audio arguments
-    // Set up Audio arguments
-    if (wantAudioCodec == "copy") {
-        cmdArgs << "-c:a" << "copy"; // Stream copy audio
-    } else {
-        if (m_hasFdk) {
-            // Use high-performance Fraunhofer FDK encoder in Variable Bit Rate Mode 4
-            cmdArgs << "-c:a" << "libfdk_aac" << "-vbr" << "4";
-        } else {
-            // Use native AAC encoder in Variable Bit Rate mode (quality scale 1.5)
-            cmdArgs << "-c:a" << "aac" << "-q:a" << "1.5";
-        }
-    }
-
-    // Map all streams (subtitles, audio channels, attachments)
-    cmdArgs << "-c:s" << "copy" // Stream copy subtitles
-            << "-map" << "0:v"   // Map all video tracks
-            << "-map" << "0:a?"  // Map all audio tracks (optional)
-            << "-map" << "0:s?"  // Map all subtitle tracks (optional)
-            << "-map" << "0:t?"; // Map all attachment/font tracks (optional)
-    
-    // Set file metadata title to matches original filename without suffix
-    cmdArgs << "-metadata" << "title=" + baseNoExt;
-    
-    // Maintain aspect ratio configurations
-    if (!meta.displayAspectRatio.isEmpty() && meta.displayAspectRatio != "0:1") {
-        cmdArgs << "-aspect" << meta.displayAspectRatio;
-    }
-    cmdArgs << tmpOut; // Output filepath
-
-    // Execute transcode process
-    emit logSignal(QString("Executing: %1 %2").arg(ffmpegBin, cmdArgs.join(" ")));
-    emit logSignal(QString("Encoding to: %1").arg(tmpOut));
-    emit statusSignal(filepath, "Processing", "Transcoding...");
-
-    // 6. Launch the FFmpeg subprocess
-    bool success = runFfmpegProcess(QStringList() << ffmpegBin << cmdArgs, meta.duration, filepath);
-
-    if (success && QFile::exists(tmpOut)) {
-        // Successful transcode completed
-        qint64 oldSize = fileInfo.size();
-        qint64 newSize = QFileInfo(tmpOut).size();
-        
-        // Bloat Protection check: If H.265 compression made the file LARGER, we discard the transcode!
-        // (Unless it was in an obsolete container, which we must always transcode to satisfy standards)
-        if (wantVideoCodec == "libx265" && newSize >= oldSize && !isObsoleteFormat) {
-            emit logSignal(QString("[NOTICE] Transcoded file (%1 MB) is larger than or equal to original (%2 MB). Discarding bloated transcode.")
-                           .arg(QString::number(static_cast<double>(newSize)/(1024.0*1024.0), 'f', 1),
-                                QString::number(static_cast<double>(oldSize)/(1024.0*1024.0), 'f', 1)));
-            QFile::remove(tmpOut); // Remove the transcode file
-            
-            QString finalOut = QDir(fileDir).filePath(baseNoExt + ".mkv");
-            
-            if (fileInfo.suffix().toLower() == "mkv") {
-                // If the original file was already in an MKV container, keep the original file in place
-                {
-                    DatabaseManager db(m_dbPath);
-                    db.recordProcessedFile(filepath, oldSize, oldSize, fileHash);
-                }
-                emit statusSignal(filepath, "Skipped", "Original kept (transcode grew)");
-                emit fileDoneSignal(filepath, "Skipped", oldSize, oldSize);
-                return true;
-            } else {
-                // If original is NOT in an MKV container, we remux (stream copy) it to MKV
-                emit logSignal(QString("Remuxing original %1 directly to MKV container (stream copy)...").arg(baseName));
-                
-                QProcess remuxProc;
-                remuxProc.start(ffmpegBin, {
-                    "-y", "-i", filepath,
-                    "-c", "copy", "-map", "0",
-                    finalOut
-                });
-                
-                if (remuxProc.waitForFinished() && remuxProc.exitCode() == 0 && QFile::exists(finalOut)) {
-                    // Trash the original file
-                    bool trashed = moveToTrash(filepath, trashDir);
-                    if (!trashed) {
-                        emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
-                        trashed = QFile::remove(filepath); // Fallback delete
-                    }
-
-                    // Duplicate prevention safeguard: If both trashing and deletion fail, abort!
-                    if (!trashed) {
-                        emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up remuxed output to prevent duplicates.").arg(filepath));
-                        if (QFile::exists(finalOut)) {
-                            QFile::remove(finalOut);
-                        }
-                        moveToErrors(filepath, errorDir);
-                        emit statusSignal(filepath, "Error", "Original delete failed");
-                        emit fileDoneSignal(filepath, "Failed", oldSize, 0);
-                        return false;
-                    }
-
-                    {
-                        DatabaseManager db(m_dbPath);
-                        db.recordProcessedFile(finalOut, oldSize, QFileInfo(finalOut).size(), fileHash);
-                    }
-                    emit statusSignal(filepath, "Completed", "Remuxed original (transcode grew)");
-                    emit fileDoneSignal(filepath, "Completed", oldSize, QFileInfo(finalOut).size());
-                    return true;
-                } else {
-                    emit logSignal("[ERROR] Failed to remux original file to MKV.");
-                    if (QFile::exists(finalOut)) QFile::remove(finalOut);
-                    moveToErrors(filepath, errorDir);
-                    emit statusSignal(filepath, "Error", "Remux failed");
-                    emit fileDoneSignal(filepath, "Failed", oldSize, 0);
-                    return false;
-                }
-            }
-        }
-
-        // Calculate space reduction percentage
-        double ratio = (static_cast<double>(oldSize - newSize) / oldSize) * 100.0;
-        
-        emit logSignal(QString("[SUCCESS] Compressed %1 (Saved %2 MB, %3% space reduction)")
-                       .arg(baseName,
-                            QString::number(static_cast<double>(oldSize - newSize) / (1024.0 * 1024.0), 'f', 1),
-                            QString::number(ratio, 'f', 1)));
-
-        // 7. Move original file to trash
-        bool trashed = moveToTrash(filepath, trashDir);
-        if (!trashed) {
-            emit logSignal(QString("Attempting direct deletion of original file: %1").arg(filepath));
-            trashed = QFile::remove(filepath); // Fallback delete
-        }
-
-        // Duplicate prevention safeguard: If original cannot be deleted, clean up output and abort!
-        if (!trashed) {
-            emit logSignal(QString("[ERROR] Failed to trash or delete original file: %1. Cleaning up temporary output to prevent duplicates.").arg(filepath));
-            if (QFile::exists(tmpOut)) {
-                QFile::remove(tmpOut);
-            }
-            emit statusSignal(filepath, "Error", "Original delete failed");
-            emit fileDoneSignal(filepath, "Failed", oldSize, 0);
-            return false;
-        }
-
-        // 8. Place the finished MKV file in its final directory location
-        QString finalOut = QDir(fileDir).filePath(baseNoExt + ".mkv");
-        
-        // Remove collision before rename
-        if (QFile::exists(finalOut)) {
-            QFile::remove(finalOut);
-        }
-        if (!safeMove(QDir::toNativeSeparators(tmpOut), QDir::toNativeSeparators(finalOut))) {
-            emit logSignal(QString("[ERROR] Failed to move temporary output to final location: %1").arg(finalOut));
-            moveToErrors(filepath, errorDir);
-            emit statusSignal(filepath, "Error", "File move failed");
-            emit fileDoneSignal(filepath, "Failed", oldSize, 0);
-            return false;
-        }
-
-        // 9. Record sizing statistics history in the global database
-        {
-            DatabaseManager db(m_dbPath);
-            db.recordProcessedFile(finalOut, oldSize, newSize, fileHash);
-        }
-        emit fileDoneSignal(filepath, "Completed", oldSize, newSize);
+    auto record = [&](const QString &path, qint64 size, const QString &status, QString details) {
+        if (!db.recordProcessedFile(path, oldSize, size, computeFastHash(path), settingsSignature(m_settings), status))
+            details += " History could not be saved: " + db.lastError();
+        finishFile(file, status, details, oldSize, size);
         return true;
-    } else {
-        // Clean up temporary output file
-        if (QFile::exists(tmpOut)) {
-            QFile::remove(tmpOut);
-        }
-
-        if (!m_isRunning) {
-            emit logSignal(QString("Transcoding cancelled by user: %1").arg(baseName));
-            emit statusSignal(filepath, "Pending", "Cancelled");
-            emit fileDoneSignal(filepath, "Cancelled", fileInfo.size(), 0);
-            return false;
-        }
-
-        // True FFmpeg execution failure
-        emit logSignal(QString("[ERROR] Transcoding failed for %1").arg(baseName));
-        moveToErrors(filepath, errorDir);
-        emit statusSignal(filepath, "Error", "FFmpeg failure");
-        emit fileDoneSignal(filepath, "Failed", fileInfo.size(), 0);
+    };
+    auto sourceUnchanged = [&]() {
+        const QFileInfo current(file);
+        return current.size() == oldSize && current.lastModified().toMSecsSinceEpoch() == oldModified
+            && computeFastHash(file) == sourceHash;
+    };
+    auto retainOriginal = [&](const QString &details) {
+        if (!sourceUnchanged()) return fail("Source changed during processing; original retained.");
+        if (m_cancelled) return fail({});
+        return record(file, oldSize, "Skipped", details);
+    };
+    qint64 newSize = QFileInfo(transaction.temporaryPath()).size();
+    if (useAvisynth && newSize >= oldSize)
+        return retainOriginal("Filtered output was larger or equal in size; cleanup was not applied. Original retained.");
+    // Restore the original ordinary-encode policy: obsolete containers always
+    // convert, audio-only conversions finish, and a bloated video conversion
+    // keeps an MKV original or remuxes another container to MKV.
+    if (!useAvisynth && videoEncoded && !obsolete && newSize >= oldSize) {
+        if (source.suffix().compare("mkv", Qt::CaseInsensitive) == 0)
+            return retainOriginal("Original kept because conversion did not shrink it.");
+        QStringList remux = input;
+        remux << maps << "-map_metadata" << "0" << "-map_chapters" << "0" << "-c" << "copy" << subtitleOptions
+            << "-progress" << "pipe:1" << "-nostats" << transaction.temporaryPath();
+        emit statusSignal(file, "Processing", "Remuxing original after size check...");
+        result = encode(ffmpeg, remux, meta.duration, file, transaction.temporaryPath(), meta.fps);
+        if (!result.ok || m_cancelled) return fail(result.error);
+        output = probeMetadata(transaction.temporaryPath(), ffprobe, &m_cancelled);
+        error = validateOutput(meta, output, false, geometry, true);
+        if (!error.isEmpty() || m_cancelled) return fail(error);
+        newSize = QFileInfo(transaction.temporaryPath()).size();
+    }
+    // A file changed by another program while encoding must not be replaced.
+    if (!sourceUnchanged()) return fail("Source changed during processing; original retained.");
+    if (m_cancelled) return fail({});
+    // Commit is deliberately noninterruptible: finish or restore the original.
+    if (!transaction.commit(error)) {
+        finishFile(file, "Failed", error, oldSize, 0);
         return false;
     }
+    return record(transaction.finalPath(), newSize, "Completed", "Finished; original preserved in .Trash.");
 }
 
-// Executes the FFmpeg command line process in the background.
-// Parses stdout/stderr logs in real-time to compute progress percentages, ETA, speeds,
-// and outputs live preview signals.
-bool TranscodeWorker::runFfmpegProcess(const QStringList &cmd, double duration, const QString &filepath)
+ProcessResult TranscodeWorker::encode(const QString &ffmpeg, const QStringList &args,
+    double duration, const QString &file, const QString &output, double outputFps)
 {
-    m_activeProcess = new QProcess();
-    m_activeProcess->setProgram(cmd[0]); // First item is the binary name ("ffmpeg")
-    m_activeProcess->setArguments(cmd.mid(1)); // Remaining items are parameters
-    
-    // Merge standard output and standard error pipelines into a single stream.
-    // Under Linux, FFmpeg writes progress info to stderr. Merging channels allows
-    // real-time reading from a single descriptor.
-    m_activeProcess->setProcessChannelMode(QProcess::MergedChannels);
-
-    m_activeProcess->start();
-    if (!m_activeProcess->waitForStarted()) {
-        delete m_activeProcess;
-        m_activeProcess = nullptr;
-        return false;
-    }
-
+    emit logSignal("Executing: " + ffmpeg + " " + args.join(' '));
     QByteArray buffer;
-    double lastFps = 0.0;
-    double lastSpeed = 0.0;
-    QString lastEta = "N/A";
-    double lastPreviewTime = -999.0;
-
-    // Continue loop while process is running or data remains in buffer
-    while (m_activeProcess->state() == QProcess::Running || m_activeProcess->bytesAvailable() > 0) {
-        // Wait up to 100ms for incoming data
-        if (m_activeProcess->waitForReadyRead(100) || m_activeProcess->bytesAvailable() > 0) {
-            buffer.append(m_activeProcess->readAll());
-            
-            // Read lines from buffer (split by \r or \n)
-            int index;
-            while (true) {
-                int idxN = buffer.indexOf('\n');
-                int idxR = buffer.indexOf('\r');
-                if (idxN != -1 && idxR != -1) {
-                    index = qMin(idxN, idxR);
-                } else if (idxN != -1) {
-                    index = idxN;
-                } else {
-                    index = idxR;
-                }
-                if (index == -1) break; // Incomplete line, wait for more data
-
-                QByteArray lineBytes = buffer.left(index);
-                buffer.remove(0, index + 1);
-                
-                QString line = QString::fromUtf8(lineBytes).trimmed();
-                if (line.isEmpty()) continue;
-
-                // Log filters: identify progress lines and compiler headers
-                bool isProgress = line.contains("frame=") || line.contains("size=") || line.contains("time=");
-                bool isHeader = line.startsWith("ffmpeg version") || line.startsWith("built with") || 
-                                line.startsWith("configuration:") || line.startsWith("libav");
-                                
-                if (isProgress) {
-                    emit logSignal(QString("[DEBUG PROGRESS] Line: \"%1\"").arg(line));
-                }
-                if (!isProgress && !isHeader) {
-                    emit logSignal(line); // Emit detailed milestone logs
-                }
-
-                // 7. Parse progress variables from the FFmpeg ticker line
-                if (isProgress && duration > 0.0) {
-                    // Extract time elapsed (matches formats like time=00:01:23.45)
-                    QRegularExpression timeRe("time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)");
-                    QRegularExpressionMatch timeMatch = timeRe.match(line);
-                    if (timeMatch.hasMatch()) {
-                        int h = timeMatch.captured(1).toInt();
-                        int m = timeMatch.captured(2).toInt();
-                        double s = timeMatch.captured(3).toDouble();
-                        double secs = h * 3600.0 + m * 60.0 + s;
-                        
-                        // If live previews are enabled, trigger frame thumbnail extraction
-                        // every 3 seconds of video timeline duration
-                        if (m_livePreviewEnabled) {
-                            if (secs >= lastPreviewTime + 3.0) {
-                                emit previewFrameSignal(filepath, secs);
-                                lastPreviewTime = secs;
-                            }
-                        }
-                        
-                        // Calculate percentage completion
-                        int pct = static_cast<int>((secs / duration) * 100.0);
-
-                        // Extract frames per second (fps)
-                        QRegularExpression fpsRe("fps=\\s*(\\d+(\\.\\d+)?)");
-                        QRegularExpressionMatch fpsMatch = fpsRe.match(line);
-                        if (fpsMatch.hasMatch()) {
-                            lastFps = fpsMatch.captured(1).toDouble();
-                        }
-
-                        // Extract speed factor (e.g. speed=2.3x)
-                        QRegularExpression speedRe("speed=\\s*(\\d+(\\.\\d+)?)x");
-                        QRegularExpressionMatch speedMatch = speedRe.match(line);
-                        if (speedMatch.hasMatch()) {
-                            lastSpeed = speedMatch.captured(1).toDouble();
-                        }
-
-                        // Calculate Estimated Time of Arrival (ETA)
-                        if (lastSpeed > 0.0) {
-                            double remainingSecs = qMax(0.0, duration - secs);
-                            int etaVal = static_cast<int>(remainingSecs / lastSpeed);
-                            if (etaVal >= 3600) {
-                                int eh = etaVal / 3600;
-                                int em = (etaVal % 3600) / 60;
-                                int es = etaVal % 60;
-                                lastEta = QString("%1:%2:%3")
-                                            .arg(eh, 2, 10, QChar('0'))
-                                            .arg(em, 2, 10, QChar('0'))
-                                            .arg(es, 2, 10, QChar('0'));
-                            } else {
-                                int em = etaVal / 60;
-                                int es = etaVal % 60;
-                                lastEta = QString("%1:%2")
-                                            .arg(em, 2, 10, QChar('0'))
-                                            .arg(es, 2, 10, QChar('0'));
-                            }
-                        }
-
-                        // Calculate current temporary file size on disk and project final size
-                        qint64 outSizeBytes = 0;
-                        try {
-                            outSizeBytes = QFileInfo(cmd.last()).size();
-                        } catch (...) {}
-                        double outSizeMb = static_cast<double>(outSizeBytes) / (1024.0 * 1024.0);
-                        double projectedSizeMb = 0.0;
-                        if (pct >= 3) {
-                            projectedSizeMb = (outSizeMb / pct) * 100.0;
-                        }
-
-                        // Send progress update signal to UI cards
-                        emit progressSignal(filepath, qMin(pct, 99), lastFps, lastSpeed, lastEta, outSizeMb, projectedSizeMb);
+    double seconds = 0, fps = -1, speed = -1;
+    bool haveSeconds = false, estimated = false;
+    qint64 frames = -1, reportFrames = -1;
+    double timeUs = -1, timeMs = -1, timeText = -1, reportFps = -1, reportSpeed = -1;
+    const bool validDuration = std::isfinite(duration) && duration > 0;
+    const bool validRate = std::isfinite(outputFps) && outputFps > 0;
+    auto number = [](const QByteArray &text) {
+        bool ok = false;
+        const double value = text.toDouble(&ok);
+        return ok && std::isfinite(value) && value >= 0 ? value : -1.0;
+    };
+    auto clockTime = [&](const QByteArray &text) {
+        const auto parts = text.split(':');
+        if (parts.size() != 3 || text.startsWith('-')) return -1.0;
+        bool hoursOk = false, minutesOk = false;
+        const qint64 hours = parts[0].toLongLong(&hoursOk);
+        const int minutes = parts[1].toInt(&minutesOk);
+        const double fraction = number(parts[2]);
+        if (!hoursOk || !minutesOk || hours < 0 || minutes < 0 || minutes >= 60 || fraction < 0 || fraction >= 60)
+            return -1.0;
+        return double(hours) * 3600.0 + minutes * 60.0 + fraction;
+    };
+    QElapsedTimer elapsed;
+    elapsed.start();
+    QElapsedTimer preview;
+    preview.start();
+    bool previewSent = false;
+    return runProcess(ffmpeg, args, &m_cancelled, 0, [&](const QByteArray &out, const QByteArray &err) {
+        if (!err.isEmpty()) emit logSignal(QString::fromUtf8(err).trimmed());
+        buffer += out;
+        int end;
+        while ((end = buffer.indexOf('\n')) >= 0) {
+            const QByteArray line = buffer.left(end).trimmed();
+            buffer.remove(0, end + 1);
+            const int separator = line.indexOf('=');
+            if (separator < 0) continue;
+            const QByteArray key = line.left(separator), value = line.mid(separator + 1);
+            if (key == "out_time_us") timeUs = number(value) / 1000000.0;
+            // Despite the legacy name, FFmpeg's out_time_ms is also in microseconds.
+            else if (key == "out_time_ms") timeMs = number(value) / 1000000.0;
+            else if (key == "out_time") timeText = clockTime(value);
+            else if (key == "frame") {
+                bool ok = false;
+                const qint64 count = value.toLongLong(&ok);
+                if (ok && count >= 0) reportFrames = count;
+            }
+            else if (key == "fps") reportFps = number(value);
+            else if (key == "speed") reportSpeed = number(value.endsWith('x') ? value.chopped(1) : value);
+            else if (key == "progress") {
+                const bool advancingFrames = reportFrames >= 0 && reportFrames > frames;
+                frames = qMax(frames, reportFrames);
+                double current = timeUs >= 0 ? timeUs : timeMs >= 0 ? timeMs : timeText;
+                if (current == 0 && frames > 0) current = -1;
+                bool updatedTime = current >= 0;
+                if (updatedTime) {
+                    seconds = current;
+                    haveSeconds = true;
+                    estimated = false;
+                } else if (advancingFrames && validRate) {
+                    // A cover image can leave FFmpeg's aggregate mux time N/A
+                    // throughout an encode. Its primary video frame count still advances.
+                    const double frameTime = double(frames) / outputFps;
+                    if (std::isfinite(frameTime)) {
+                        seconds = qMax(haveSeconds ? seconds : 0.0, frameTime);
+                        haveSeconds = updatedTime = estimated = true;
                     }
+                }
+                if (reportFps >= 0) fps = reportFps;
+                if (!haveSeconds) speed = -1;
+                else if (reportSpeed > 0) speed = reportSpeed;
+                else if (updatedTime && elapsed.elapsed() > 0) {
+                    const double measured = seconds / (elapsed.elapsed() / 1000.0);
+                    if (std::isfinite(measured) && measured > 0) speed = measured;
+                }
+                const double fraction = validDuration && haveSeconds
+                    ? seconds >= duration ? 1.0 : seconds / duration : -1.0;
+                const int percentage = fraction >= 0 ? qMin(99, int(fraction * 100)) : -1;
+                const double size = QFileInfo(output).size() / (1024.0 * 1024.0);
+                QString eta = "N/A";
+                const double remaining = validDuration && haveSeconds && speed > 0
+                    ? qMax(0.0, duration - seconds) / speed : -1.0;
+                if (std::isfinite(remaining) && remaining >= 0 && remaining <= std::numeric_limits<int>::max()) {
+                    const int whole = int(remaining);
+                    eta = (estimated ? QString("~") : QString()) + QString("%1:%2:%3")
+                        .arg(whole / 3600, 2, 10, QChar('0')).arg(whole / 60 % 60, 2, 10, QChar('0')).arg(whole % 60, 2, 10, QChar('0'));
+                }
+                emit progressSignal(file, percentage, fps, speed, eta, size, fraction >= 0.03 ? size / fraction : 0);
+                timeUs = timeMs = timeText = reportFps = reportSpeed = -1;
+                reportFrames = -1;
+                if (m_livePreviewEnabled && (preview.elapsed() >= 3000 || (!previewSent && value == "end"))) {
+                    if (m_settings.value("avs_enabled", false).toBool()) {
+                        // Read already-filtered output, never launch another AviSynth graph.
+                        // Stay behind the muxer's buffered clusters. Own the short-lived
+                        // reader here so it closes before validation/rename on Windows.
+                        const double position = qMax(0.0, seconds - 5.0);
+                        const auto frame = runProcess(ffmpeg, {"-v", "error", "-nostdin", "-threads", "1",
+                            "-filter_threads", "1", "-seek_timestamp", "1", "-ss", QString::number(position, 'f', 6),
+                            "-i", output, "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", "scale=iw*sar:ih,scale=240:-1,setsar=1",
+                            "-frames:v", "1", "-threads:v", "1", "-f", "image2pipe", "-c:v", "png", "-"}, &m_cancelled, 2000);
+                        if (frame.ok && !frame.output.isEmpty() && m_livePreviewEnabled) {
+                            emit encodedPreviewSignal(file, frame.output, position);
+                            previewSent = true;
+                        }
+                    } else {
+                        emit previewFrameSignal(file, seconds);
+                        previewSent = true;
+                    }
+                    preview.restart();
                 }
             }
         }
-
-        // Handle queue cancellations
-        if (!m_isRunning) {
-            m_activeProcess->kill(); // Send terminate signal
-            m_activeProcess->waitForFinished();
-            break;
-        }
-    }
-
-    int returnCode = m_activeProcess->exitCode();
-    delete m_activeProcess;
-    m_activeProcess = nullptr;
-
-    return returnCode == 0;
-}
-
-// Moves original files to the workspace's trash folder (.Trash), preserving subdirectories.
-bool TranscodeWorker::moveToTrash(const QString &filepath, const QString &trashDir)
-{
-    try {
-        QFileInfo fi(filepath);
-        QString fileDir = fi.absolutePath();
-        QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
-        
-        // Re-construct the relative directory hierarchy inside the Trash folder
-        QString targetTrashDir = trashDir;
-        if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
-            targetTrashDir = QDir(trashDir).filePath(relDir);
-        }
-
-        // Convert path separators to native format to support Windows UNC network shares
-        QDir().mkpath(QDir::toNativeSeparators(targetTrashDir));
-        QString baseName = fi.fileName();
-        QString dest = QDir(targetTrashDir).filePath(baseName);
-        
-        // If a file with the same name already exists in trash, append the file's modification timestamp to prevent collision
-        if (QFile::exists(dest)) {
-            QString baseNoExt = fi.completeBaseName();
-            QString ext = fi.suffix();
-            qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-            dest = QDir(targetTrashDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
-        }
-
-        QString nativeSrc = QDir::toNativeSeparators(filepath);
-        QString nativeDest = QDir::toNativeSeparators(dest);
-
-        if (safeMove(nativeSrc, nativeDest)) {
-            emit logSignal(QString("Original file moved to Trash: %1").arg(QDir(trashDir).relativeFilePath(dest)));
-            return true;
-        } else {
-            emit logSignal(QString("[WARN] Failed to move %1 to Trash").arg(baseName));
-        }
-    } catch (...) {
-        emit logSignal(QString("[WARN] Failed to move %1 to Trash").arg(QFileInfo(filepath).fileName()));
-    }
-    return false;
-}
-
-// Moves failed source files to the errors folder (.Errors), preserving folder subdirectories.
-void TranscodeWorker::moveToErrors(const QString &filepath, const QString &errorDir)
-{
-    try {
-        QFileInfo fi(filepath);
-        QString fileDir = fi.absolutePath();
-        QString relDir = QDir(m_rootDir).relativeFilePath(fileDir);
-        
-        // Re-construct relative directory hierarchy inside the Errors folder
-        QString targetErrorDir = errorDir;
-        if (!relDir.isEmpty() && relDir != "." && relDir != "..") {
-            targetErrorDir = QDir(errorDir).filePath(relDir);
-        }
-
-        // Convert path separators to native format
-        QDir().mkpath(QDir::toNativeSeparators(targetErrorDir));
-        QString baseName = fi.fileName();
-        QString dest = QDir(targetErrorDir).filePath(baseName);
-        
-        // Append modification timestamp if file name collision occurs
-        if (QFile::exists(dest)) {
-            QString baseNoExt = fi.completeBaseName();
-            QString ext = fi.suffix();
-            qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-            dest = QDir(targetErrorDir).filePath(QString("%1_%2.%3").arg(baseNoExt, QString::number(mtime), ext));
-        }
-
-        QString nativeSrc = QDir::toNativeSeparators(filepath);
-        QString nativeDest = QDir::toNativeSeparators(dest);
-
-        if (safeMove(nativeSrc, nativeDest)) {
-            emit logSignal(QString("Failed file moved to .Errors: %1").arg(QDir(errorDir).relativeFilePath(dest)));
-        } else {
-            emit logSignal(QString("[WARN] Failed to move %1 to Errors").arg(baseName));
-        }
-    } catch (...) {
-        emit logSignal(QString("[WARN] Failed to move %1 to Errors").arg(QFileInfo(filepath).fileName()));
-    }
+    });
 }
