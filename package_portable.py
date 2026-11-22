@@ -8,7 +8,7 @@ import sys
 import tempfile
 import zipfile
 
-VERSION = "2.0.3"
+VERSION = "2.1"
 
 
 def find_deployer(build_dir):

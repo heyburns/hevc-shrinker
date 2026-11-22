@@ -1,9 +1,14 @@
 ; HEVC Video Shrinker Inno Setup Script
 ; Generates a professional Windows Installer (.exe) for distribution.
 
+#define ReleaseVersion "2.1"
+
 [Setup]
 AppName=HEVC Video Shrinker
-AppVersion=2.0.3
+AppVersion={#ReleaseVersion}
+VersionInfoVersion={#ReleaseVersion}
+VersionInfoProductName=HEVC Video Shrinker
+VersionInfoProductTextVersion={#ReleaseVersion}
 AppPublisher=HEVC Video Shrinker
 DefaultDirName={autopf}\HEVCVideoShrinker
 DefaultGroupName=HEVC Video Shrinker
@@ -11,7 +16,7 @@ UninstallDisplayIcon={app}\hevc_shrinker.exe
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir=dist
-OutputBaseFilename=hevc_shrinker_setup_2.0.3_win64
+OutputBaseFilename=hevc_shrinker_setup_{#ReleaseVersion}_win64
 SetupIconFile=app_icon.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64

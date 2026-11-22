@@ -104,7 +104,7 @@ If you want to run the app from a thumb drive or share it easily without an inst
    ```powershell
    python package_portable.py
    ```
-This script finds the compiled executable in `build/Release` or `build`, runs the matching `windeployqt`, checks the platform/SQLite plugins, and creates a ZIP archive located at dist/hevc_shrinker_portable_2.0.3_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
+This script finds the compiled executable in `build/Release` or `build`, runs the matching `windeployqt`, checks the platform/SQLite plugins, and creates a ZIP archive located at dist/hevc_shrinker_portable_2.1_win64.zip. You can drop ffmpeg.exe and ffprobe.exe directly inside this zip folder to make it fully self-contained.
 
 #### Installer version
 I have also included an Inno Setup script (setup.iss) to create a standard Windows installer wizard. Run `python package_portable.py` first to populate `deploy/windows`, then open `setup.iss` in Inno Setup. Compiling it will generate a setup executable in the dist/ folder. The installer sets up the program in Program Files, creates optional desktop shortcuts, and includes a standard uninstaller.
@@ -114,6 +114,8 @@ I have included a packaging script (`package_linux.py`) that compiles the applic
 *   **AppImage**: A standalone, self-contained executable that bundles the application and its Qt6 libraries, allowing it to run on almost any Linux distribution.
 *   **Debian Package (.deb)**: For Debian, Ubuntu, and derivatives, with automatic resolution of runtime dependencies (`ffmpeg`, `libqt6widgets6`, etc.).
 *   **Red Hat Package (.rpm)**: For Fedora, RHEL, and CentOS, with automatic package dependency resolution.
+
+The 2.1 Linux release packages target x86-64 systems with glibc 2.35 or newer (for example, Ubuntu 22.04+ and Debian 12+). The AppImage bundles Qt; native packages require Qt 6.2.4 or newer and its SQLite plugin. FFmpeg and FFprobe remain system dependencies.
 
 To generate these packages from your build environment, run:
 ```bash
@@ -127,7 +129,11 @@ CPU x265 is the default on launch. Before starting a queue, enable **Advanced > 
 
 The toggle applies to ordinary encodes and AviSynth samples/final encodes. It preserves the existing scan, processed-file history, skip, and size-check rules; selecting NVENC does not force already-compliant HEVC files to be re-encoded. If hardware encoding is unavailable, the job fails with the original retained instead of switching to CPU encoding.
 
-On Windows and Linux, NVENC requires an NVIDIA GPU supporting the fixed HEVC Main10 encoding profile, compatible drivers, and FFmpeg with `hevc_nvenc`. An AviSynth FFmpeg override must support it too. AviSynth filters still run on the CPU. The app installs none of these dependencies and needs no NVIDIA SDK to build.
+Ordinary NVIDIA encodes automatically use NVDEC decoding and CUDA Lanczos resizing/P010 conversion when the selected FFmpeg provides `scale_cuda` and the source is eligible. Frames stay on the GPU through preprocessing and encoding, including normal frame-rate reduction. This path supports progressive, unrotated SDR H.264, HEVC, MPEG-2, VP9, and AV1 with conventional 8/10-bit 4:2:0 pixels, subject to GPU decoder support. AviSynth, deinterlacing, rotation, other source formats, and missing CUDA filters retain CPU preprocessing with NVENC encoding. A failed GPU preprocessing attempt retries once with CPU preprocessing and the same NVENC profile; cancellation never starts a retry. The log identifies the path and any fallback. CPU and CUDA Lanczos resizing can produce slightly different pixels.
+
+On Windows and Linux, NVENC requires an NVIDIA GPU supporting the fixed HEVC Main10 encoding profile, compatible drivers, and FFmpeg with `hevc_nvenc`. Automatic GPU preprocessing additionally requires working NVDEC/CUDA support and `scale_cuda` in that same FFmpeg. An AviSynth FFmpeg override must support NVENC too. AviSynth filters still run on the CPU. The app installs none of these dependencies and needs no NVIDIA SDK to build.
+
+On Gentoo, enable `nvenc cuda-clang` for `media-video/ffmpeg` in `/etc/portage/package.use` while retaining your other USE flags, then rebuild FFmpeg. `cuda-clang` enables CUDA filters using Clang's NVPTX target; a separate CUDA toolkit/NPP installation is not required. Preserve any existing AviSynth configuration in `/etc/portage/package.env` and its referenced environment file. Check filter availability with `ffmpeg -hide_banner -h filter=scale_cuda`.
 
 ## Optional AviSynth cleanup
 
@@ -168,6 +174,8 @@ python -m unittest discover -s tests -p "test_*.py"
 ```
 
 The same C++ tests run on Windows and Linux. Media tests use synthetic temporary videos and an isolated database; they do not operate on your library. Missing FFmpeg/FFprobe causes media tests to be reported as skipped. AviSynth integration tests additionally require AviSynth+ and L-SMASH Works. Set `HEVC_TEST_REQUIRE_AVISYNTH=1` when validating an AviSynth-enabled installation so missing dependencies fail rather than skip those checks. Check the detailed test output when validating a release.
+
+Real GPU preprocessing tests are opt-in: set `HEVC_TEST_CUDA=1`, or `HEVC_TEST_REQUIRE_CUDA=1` to require a working NVDEC/CUDA path. These check GPU resizing, frame-rate reduction, output timing, Main10 format, and retained audio/subtitles.
 
 Real GPU encoding tests are opt-in: set `HEVC_TEST_NVENC=1` to exercise ordinary encoding, AviSynth cropping, and live preview when supported hardware is available, or `HEVC_TEST_REQUIRE_NVENC=1` to fail when NVENC is unavailable. Also set `HEVC_TEST_REQUIRE_AVISYNTH=1` to require the filtered path. The default suite checks NVENC selection and failure handling without GPU hardware.
 

@@ -5,6 +5,8 @@
 
 // Normal encodes and AviSynth samples share the same video encoder settings.
 namespace VideoEncoder {
+inline constexpr int NvencGopFrames = 250;
+
 bool isNvenc(const QVariantMap &settings);
 QString name(const QVariantMap &settings);
 QString pixelFormat(const QVariantMap &settings);

@@ -24,6 +24,7 @@ public:
     QString videoFilter(bool restoreSourceTiming = false) const;
     QStringList colorArguments() const { return m_colorArguments; }
     QString timingDescription() const { return m_timingDescription; }
+    double videoStart() const { return m_videoStart; }
     QString scriptError() const;
     QString validateEncodedOutput(const QString &output, const QString &ffprobe, const std::atomic_bool *cancel) const;
     static QString quote(const QString &value);

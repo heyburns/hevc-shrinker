@@ -33,7 +33,8 @@ private:
     std::atomic_bool m_cancelled{false}, m_livePreviewEnabled{false};
     bool processFile(const QString &filepath, const QString &ffmpeg, const QString &ffprobe);
     ProcessResult encode(const QString &ffmpeg, const QStringList &arguments,
-        double duration, const QString &filepath, const QString &output, double outputFps = 0);
+        double duration, const QString &filepath, const QString &output, double outputFps = 0,
+        double videoStart = 0);
     void finishFile(const QString &filepath, const QString &status, const QString &details,
         qint64 oldSize, qint64 newSize);
 };

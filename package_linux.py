@@ -6,6 +6,9 @@ import tarfile
 import subprocess
 import urllib.request
 
+VERSION = "2.1"
+BUILD_DIR = os.environ.get("HEVC_BUILD_DIR", "build-linux")
+
 def run_cmd(cmd, cwd=None):
     print(f"Running: {' '.join(cmd)}")
     res = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -16,10 +19,10 @@ def run_cmd(cmd, cwd=None):
 
 def compile_project():
     print("=== 1. Compiling Release Binary ===")
-    os.makedirs("build-linux", exist_ok=True)
-    if not run_cmd(["cmake", "-B", "build-linux", "-S", ".", "-DCMAKE_BUILD_TYPE=Release"]):
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    if not run_cmd(["cmake", "-B", BUILD_DIR, "-S", ".", "-DCMAKE_BUILD_TYPE=Release"]):
         return False
-    if not run_cmd(["cmake", "--build", "build-linux"]):
+    if not run_cmd(["cmake", "--build", BUILD_DIR, "--parallel", str(min(os.cpu_count() or 1, 8))]):
         return False
     return True
 
@@ -79,12 +82,15 @@ Terminal=false
         return False
     env["QMAKE"] = qmake
     env["NO_STRIP"] = "1"
+    env["VERSION"] = VERSION
+    env.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
+    env.setdefault("MKSQUASHFS_OPTIONS", "-processors 4")
     
     # Build the AppImage
     cmd = [
         os.path.abspath(ld_path),
         "--appdir", "AppDir",
-        "-e", "build-linux/hevc_shrinker",
+        "-e", os.path.join(BUILD_DIR, "hevc_shrinker"),
         "-d", "hevc_shrinker.desktop",
         "-i", "hevc_shrinker.png",
         "--plugin", "qt",
@@ -112,7 +118,7 @@ Terminal=false
     found = False
     for f in os.listdir("."):
         if f.endswith(".AppImage") and f.startswith("HEVC_Video_Shrinker") and previous.get(f) != os.stat(f).st_mtime_ns:
-            dest = os.path.join("dist", "HEVC_Video_Shrinker-2.0.3-x86_64.AppImage")
+            dest = os.path.join("dist", f"HEVC_Video_Shrinker-{VERSION}-x86_64.AppImage")
             if os.path.exists(dest):
                 os.remove(dest)
             shutil.move(f, dest)
@@ -140,7 +146,7 @@ def package_deb():
     os.makedirs(f"{pkg_dir}/usr/share/icons/hicolor/512x512/apps")
     
     # Copy files
-    shutil.copy("build-linux/hevc_shrinker", f"{pkg_dir}/usr/bin/")
+    shutil.copy(os.path.join(BUILD_DIR, "hevc_shrinker"), f"{pkg_dir}/usr/bin/")
     shutil.copy("app_icon.png", f"{pkg_dir}/usr/share/icons/hicolor/512x512/apps/hevc_shrinker.png")
     
     # Create desktop launcher
@@ -157,12 +163,12 @@ Terminal=false
         f.write(desktop_content)
         
     # Create control file
-    control_content = """Package: hevc-shrinker
-Version: 2.0.3-1
+    control_content = f"""Package: hevc-shrinker
+Version: {VERSION}-1
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: libqt6widgets6, libqt6sql6-sqlite, ffmpeg
+Depends: libc6 (>= 2.35), libstdc++6 (>= 11), libqt6widgets6 (>= 6.2.4), libqt6sql6-sqlite (>= 6.2.4), ffmpeg
 Maintainer: HEVC Video Shrinker Developers <developer@example.com>
 Description: A native batch video compressor.
  Shrinks video libraries into optimized H.265 (HEVC) files
@@ -176,16 +182,16 @@ Description: A native batch video compressor.
         f.write("2.0\n")
         
     # Compile control.tar.gz
-    with tarfile.open("control.tar.gz", "w:gz") as tar:
+    with tarfile.open("control.tar.gz", "w:gz", format=tarfile.GNU_FORMAT) as tar:
         # control file must be at root of tarball
         tar.add(f"{pkg_dir}/DEBIAN/control", arcname="control")
         
     # Compile data.tar.xz
-    with tarfile.open("data.tar.xz", "w:xz") as tar:
+    with tarfile.open("data.tar.xz", "w:xz", format=tarfile.GNU_FORMAT) as tar:
         tar.add(f"{pkg_dir}/usr", arcname="usr")
         
     # Build package using standard ar (dpkg-deb is not required!)
-    deb_out = "dist/hevc-shrinker_2.0.3-1_amd64.deb"
+    deb_out = f"dist/hevc-shrinker_{VERSION}-1_amd64.deb"
     if os.path.exists(deb_out):
         os.remove(deb_out)
         
@@ -209,29 +215,32 @@ def package_rpm():
     
     # Check if rpmbuild is available
     if not shutil.which("rpmbuild"):
-        print("[NOTICE] 'rpmbuild' tool is missing. Skipping RPM packaging.")
+        print("[ERROR] 'rpmbuild' tool is missing; RPM packaging cannot complete.")
         print("To enable RPM support on Gentoo, run: sudo emerge app-arch/rpm")
-        return True
+        return False
         
+    os.makedirs("dist", exist_ok=True)
     rpmbuild_dir = os.path.abspath("pack-rpm-tmp")
+    if os.path.exists(rpmbuild_dir):
+        shutil.rmtree(rpmbuild_dir)
     for sub in ["BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"]:
         os.makedirs(os.path.join(rpmbuild_dir, sub), exist_ok=True)
         
     # Copy build items to SOURCES
-    shutil.copy("build-linux/hevc_shrinker", os.path.join(rpmbuild_dir, "SOURCES"))
+    shutil.copy(os.path.join(BUILD_DIR, "hevc_shrinker"), os.path.join(rpmbuild_dir, "SOURCES"))
     shutil.copy("hevc_shrinker.desktop", os.path.join(rpmbuild_dir, "SOURCES"))
     shutil.copy("app_icon.png", os.path.join(rpmbuild_dir, "SOURCES"))
     
     # Spec file contents
     spec_content = """Name:           hevc_shrinker
-Version:        2.0.3
+Version:        @RELEASE_VERSION@
 Release:        1%{?dist}
 Summary:        Batch video compressor using HEVC H.265.
 
 License:        GPLv3
-URL:            https://github.com/yourusername/hevc_shrinker
+URL:            https://github.com/heyburns/hevc-shrinker
 BuildArch:      x86_64
-Requires:       qt6-qtbase, ffmpeg
+Requires:       qt6-qtbase >= 6.2.4, qt6-qtbase-sqlite >= 6.2.4, ffmpeg
 
 %description
 A native batch video compressor that shrinks video libraries into H.265 format using FFmpeg.
@@ -257,6 +266,8 @@ cp %{_sourcedir}/app_icon.png %{buildroot}%{_datadir}/icons/hicolor/512x512/apps
 %{_datadir}/icons/hicolor/512x512/apps/hevc_shrinker.png
 
 %changelog
+* Sat Nov 21 2026 HEVC Video Shrinker Developers <developer@example.com> - @RELEASE_VERSION@-1
+- Release 2.1 with optional AviSynth cleanup, NVENC, GPU preprocessing, and cross-platform live preview fixes
 * Tue Jul 28 2026 HEVC Video Shrinker Developers <developer@example.com> - 2.0.3-1
 - Release version 2.0.3 with aspect ratio / anamorphic scaling fixes
 * Fri Jul 17 2026 HEVC Video Shrinker Developers <developer@example.com> - 2.0.2-1
@@ -266,6 +277,7 @@ cp %{_sourcedir}/app_icon.png %{buildroot}%{_datadir}/icons/hicolor/512x512/apps
 * Sun Jul 05 2026 HEVC Video Shrinker Developers <developer@example.com> - 2.0-1
 - Initial C++ package build
 """
+    spec_content = spec_content.replace("@RELEASE_VERSION@", VERSION)
     spec_path = os.path.join(rpmbuild_dir, "SPECS", "hevc_shrinker.spec")
     with open(spec_path, "w") as f:
         f.write(spec_content)

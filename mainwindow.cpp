@@ -24,6 +24,10 @@
 #include <QSignalBlocker>
 #include <cmath>
 
+namespace {
+constexpr auto appVersion = "2.1";
+}
+
 // -------------------------------------------------------------
 // TranscodeMonitorCard Implementation
 // -------------------------------------------------------------
@@ -187,7 +191,7 @@ MainWindow::~MainWindow()
 // Builds the graphical layout, sidebar configurations, grid tables, and status meters.
 void MainWindow::initUi()
 {
-    setWindowTitle("HEVC Video Shrinker v2.0.3");
+    setWindowTitle(QString("HEVC Video Shrinker v%1").arg(QString::fromLatin1(appVersion)));
     resize(1050, 620); // Widened default window size to fit columns without clipping text
 
     // 1. Create the Menu Bar
@@ -1307,13 +1311,14 @@ void MainWindow::onAboutSelected()
     msgBox.setWindowTitle("About HEVC Video Shrinker");
     msgBox.setTextFormat(Qt::RichText);
     msgBox.setIcon(QMessageBox::Information);
-    msgBox.setText(QString("<h3>HEVC Video Shrinker v2.0.3</h3>"
+    msgBox.setText(QString("<h3>HEVC Video Shrinker v%1</h3>"
                            "<p>A video compressor interface written in C++ and Qt6.</p>"
                            "<p><b>Dependencies Status:</b><br/>"
-                           "• FFmpeg: %1<br/>"
-                           "• FFprobe: %2</p>"
+                           "• FFmpeg: %2<br/>"
+                           "• FFprobe: %3</p>"
                            "<p>Released under the open-source GPLv3 license.</p>")
-                   .arg(ffmpeg.isEmpty() ? QString("<font color='red'>Missing</font>") : QString("<font color='green'>Detected</font>"),
+                   .arg(QString::fromLatin1(appVersion),
+                        ffmpeg.isEmpty() ? QString("<font color='red'>Missing</font>") : QString("<font color='green'>Detected</font>"),
                         ffprobe.isEmpty() ? QString("<font color='red'>Missing</font>") : QString("<font color='green'>Detected</font>")));
     msgBox.exec();
 }

@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow> // Core window container class
+#include <QActionGroup>
 #include <QTableWidget> // Grid-like spreadsheet table for queue display
 #include <QGroupBox> // Framed title container grouping widgets together
 #include <QProgressBar> // Graphical progress bar indicator

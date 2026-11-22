@@ -30,7 +30,7 @@ QStringList arguments(const QVariantMap &settings)
         // and CPU CRF are different controls; CPU settings do not affect this.
         return {"-c:v:0", "hevc_nvenc", "-profile:v:0", "main10", "-preset:v:0", "p5",
             "-tune:v:0", "hq", "-rc:v:0", "vbr", "-cq:v:0", "35.25", "-b:v:0", "0",
-            "-g:v:0", "250", "-bf:v:0", "4", "-b_ref_mode:v:0", "middle",
+            "-g:v:0", QString::number(NvencGopFrames), "-bf:v:0", "4", "-b_ref_mode:v:0", "middle",
             "-rc-lookahead:v:0", "20", "-spatial-aq:v:0", "1", "-temporal-aq:v:0", "1",
             "-aq-strength:v:0", "8", "-multipass:v:0", "qres"};
     }

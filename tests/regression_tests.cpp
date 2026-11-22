@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <initializer_list>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -28,6 +29,7 @@
 #include "avisynthpipeline.h"
 #include "avisynthdialog.h"
 #include "videoencoder.h"
+#include "videopreprocessor.h"
 
 namespace {
 bool put(const QString &path, const QByteArray &data)
@@ -62,6 +64,22 @@ QJsonObject metadata(const QJsonArray &streams)
 {
     return {{"format", QJsonObject{{"duration", "4.0"}}}, {"streams", streams}};
 }
+class ScopedEnvironment {
+public:
+    ScopedEnvironment(std::initializer_list<const char *> names) {
+        for (const char *name : names) {
+            m_values.append(qMakePair(QByteArray(name), qgetenv(name)));
+            qunsetenv(name);
+        }
+    }
+    ~ScopedEnvironment() {
+        for (const auto &item : m_values)
+            if (item.second.isNull()) qunsetenv(item.first.constData());
+            else qputenv(item.first.constData(), item.second);
+    }
+private:
+    QList<QPair<QByteArray, QByteArray>> m_values;
+};
 }
 
 class RegressionTests : public QObject {
@@ -597,6 +615,211 @@ private slots:
         }
         QVERIFY(sawProbe); QVERIFY(sawEncode);
     }
+    void gpuPreprocessingPlanEligibilityAndStreamSelection() {
+        ScopedEnvironment env{"HEVC_TEST_CUDA_SUPPORT"};
+        qputenv("HEVC_TEST_CUDA_SUPPORT","1");
+        QTemporaryDir dir;
+        const QString mock=dir.filePath(QFileInfo(fixtureProgram()).fileName());
+        QVERIFY(QFile::copy(fixtureProgram(),mock));
+        auto main=video(7,"h264",640,480,true);
+        main["pix_fmt"]="yuv420p";
+        auto meta=parseMetadata(metadata({video(2,"png",640,480,false,true),
+            QJsonObject{{"index",5},{"codec_type","audio"},{"codec_name","aac"}},main}));
+        auto config=settings(); config["nvenc"]=true;
+        const VideoGeometry geometry{320,240,true};
+        auto plan=VideoPreprocessor::plan(mock,config,meta,geometry,false,false);
+        QVERIFY2(plan.accelerated,qPrintable(plan.reason));
+        const auto &options=plan.inputOptions;
+        QCOMPARE(options.value(options.indexOf("-hwaccel:v:1")+1),QString("cuda"));
+        QCOMPARE(options.value(options.indexOf("-hwaccel_output_format:v:1")+1),QString("cuda"));
+        QCOMPARE(options.value(options.indexOf("-threads:v:1")+1),QString("1"));
+        QCOMPARE(options.value(options.indexOf("-extra_hw_frames:v:1")+1),QString("8"));
+        QVERIFY(!options.contains("-hwaccel:v:0")); // Cover image remains a copied software stream.
+        const auto filters=plan.filters.join(',');
+        QVERIFY(filters.contains("scale_cuda=")); QVERIFY(filters.contains("w=320:h=240"));
+        QVERIFY(filters.contains("format=p010le")); QVERIFY(filters.contains("passthrough=0"));
+        QVERIFY(plan.filters.contains("setsar=1"));
+        auto noResize=VideoPreprocessor::plan(mock,config,meta,{640,480,false},false,false);
+        QVERIFY(noResize.accelerated); QVERIFY(!noResize.filters.contains("setsar=1"));
+        meta.fps=60.0;
+        auto halved=VideoPreprocessor::plan(mock,config,meta,geometry,false,true);
+        QVERIFY(halved.accelerated); QVERIFY(halved.filters.contains("fps=fps=30.00000000:round=down"));
+        auto cpu=config; cpu["nvenc"]=false;
+        QVERIFY(!VideoPreprocessor::plan(mock,cpu,meta,geometry,false,false).accelerated);
+        auto avs=config; avs["avs_enabled"]=true;
+        QVERIFY(!VideoPreprocessor::plan(mock,avs,meta,geometry,false,false).accelerated);
+        QVERIFY(!VideoPreprocessor::plan(mock,config,meta,geometry,true,false).accelerated);
+        for (int unsuitable=0; unsuitable<7; ++unsuitable) {
+            auto other=meta;
+            if (unsuitable==0) other.rotation=90;
+            if (unsuitable==1) other.hdr=true;
+            if (unsuitable==2) other.dolbyVision=true;
+            if (unsuitable==3) other.vcodec="mpeg4";
+            if (unsuitable==4) other.width=641;
+            if (unsuitable==5) other.valid=false;
+            if (unsuitable==6) {
+                auto unsupported=main; unsupported["pix_fmt"]="yuv444p10le";
+                other=parseMetadata(metadata({unsupported}));
+            }
+            const auto rejected=VideoPreprocessor::plan(mock,config,other,geometry,false,false);
+            QVERIFY2(!rejected.accelerated,qPrintable(QString::number(unsuitable)));
+        }
+        QVERIFY(!VideoPreprocessor::plan(mock,config,meta,{319,240,true},false,false).accelerated);
+        std::atomic_bool cancelled{true};
+        QVERIFY(!VideoPreprocessor::plan(mock,config,meta,geometry,false,false,&cancelled).accelerated);
+        // A similarly named filter must not be mistaken for the CUDA scaler.
+        qputenv("HEVC_TEST_CUDA_SUPPORT","lookalike");
+        const QString lookalike=dir.filePath("other-"+QFileInfo(fixtureProgram()).fileName());
+        QVERIFY(QFile::copy(fixtureProgram(),lookalike));
+        QVERIFY(!VideoPreprocessor::plan(lookalike,config,meta,geometry,false,false).accelerated);
+    }
+    void gpuPreprocessingWorkerFallback_data() {
+        QTest::addColumn<bool>("supported"); QTest::addColumn<bool>("gpuFails"); QTest::addColumn<bool>("cpuFails");
+        QTest::newRow("GPU decode and scale") << true << false << false;
+        QTest::newRow("missing CUDA filter") << false << false << false;
+        QTest::newRow("GPU failure retries CPU preprocessing") << true << true << false;
+        QTest::newRow("both attempts fail safely") << true << true << true;
+        QTest::newRow("CPU path failure is not retried") << false << false << true;
+    }
+    void gpuPreprocessingWorkerFallback() {
+        QFETCH(bool,supported); QFETCH(bool,gpuFails); QFETCH(bool,cpuFails);
+        if(m_ffmpeg.isEmpty()||m_ffprobe.isEmpty()) QSKIP("FFmpeg/FFprobe required");
+        ScopedEnvironment env{"HEVC_TEST_CUDA_SUPPORT","HEVC_TEST_CUDA_FAIL","HEVC_TEST_CPU_PREPROCESS_FAIL",
+            "HEVC_TEST_CUDA_WAIT","HEVC_TEST_NVENC_SUPPORT","HEVC_TEST_NVENC_PROBE_FAIL","HEVC_TEST_HIDE_X265",
+            "HEVC_TEST_ENCODED_FILE","HEVC_TEST_COMMANDS"};
+        QTemporaryDir dir;
+        const QString input=dir.filePath("input.mp4"), encoded=dir.filePath("encoded.mkv"), dbPath=dir.filePath("history.db");
+        QVERIFY(ff({"-f","lavfi","-i","testsrc=size=320x240:rate=24","-t","2","-vf","setsar=2/1",
+            "-c:v","libx264","-threads","1","-crf","0","-pix_fmt","yuv420p",input}));
+        const auto original=read(input);
+        QVERIFY(ff({"-i",input,"-vf","scale=640:240,setsar=1","-c:v","libx265",
+            "-x265-params","pools=2:log-level=error","-pix_fmt","yuv420p10le",encoded}));
+        const QString mock=dir.filePath(QFileInfo(fixtureProgram()).fileName()), trace=dir.filePath("commands.jsonl");
+        QVERIFY(QFile::copy(fixtureProgram(),mock));
+        qputenv("HEVC_TEST_NVENC_SUPPORT","1"); qputenv("HEVC_TEST_HIDE_X265","1");
+        if(supported) qputenv("HEVC_TEST_CUDA_SUPPORT","1");
+        if(gpuFails) qputenv("HEVC_TEST_CUDA_FAIL","1");
+        if(cpuFails) qputenv("HEVC_TEST_CPU_PREPROCESS_FAIL","1");
+        qputenv("HEVC_TEST_ENCODED_FILE",encoded.toUtf8()); qputenv("HEVC_TEST_COMMANDS",trace.toUtf8());
+        auto config=settings(); config["nvenc"]=true; config["ffmpeg"]=mock;
+        const bool success=!cpuFails || (supported && !gpuFails);
+        QCOMPARE(runWorker(input,dir.path(),dbPath,config),success ? QString("Completed") : QString("Failed"));
+        QList<QStringList> attempts;
+        for(const auto &line : read(trace).split('\n')) if(!line.isEmpty()) {
+            const auto array=QJsonDocument::fromJson(line).array();
+            QStringList args; for(const auto &item : array) args.append(item.toString());
+            if(args.contains("-progress")) attempts.append(args);
+        }
+        QCOMPARE(attempts.size(),supported && gpuFails ? 2 : 1);
+        for(int i=0; i<attempts.size(); ++i) {
+            const auto &args=attempts[i];
+            QVERIFY(args.contains("hevc_nvenc")); QVERIFY(args.contains("35.25")); QVERIFY(!args.contains("libx265"));
+            const bool gpu=supported && i==0;
+            QCOMPARE(args.contains("-hwaccel:v:0"),gpu);
+            const QString filters=args.value(args.indexOf("-filter:v:0")+1);
+            QCOMPARE(filters.contains("scale_cuda="),gpu);
+            if(gpu) {
+                QVERIFY(args.indexOf("-hwaccel:v:0")<args.indexOf("-i"));
+                QVERIFY(!filters.contains("scale=640:240"));
+            } else {
+                QVERIFY(filters.contains("scale=640:240:flags=lanczos"));
+                QVERIFY(filters.contains("format=p010le"));
+            }
+        }
+        DatabaseManager db(dbPath);
+        if(success) {
+            QCOMPARE(read(dir.filePath(".Trash/input.mp4")),original);
+            const auto history=db.getProcessedFileInfo(dir.filePath("input.mkv"));
+            QVERIFY(history.found); QCOMPARE(history.settingsKey,settingsSignature(config));
+            QCOMPARE(read(dir.filePath("input.mkv")),read(encoded));
+        } else {
+            QCOMPARE(read(input),original); QVERIFY(!QFileInfo::exists(dir.filePath("input.mkv")));
+            QVERIFY(!QFileInfo::exists(dir.filePath(".Trash/input.mp4")));
+            QVERIFY(!db.getProcessedFileInfo(input).found);
+        }
+    }
+    void gpuPreprocessingCancellationDoesNotRetry() {
+        if(m_ffmpeg.isEmpty()||m_ffprobe.isEmpty()) QSKIP("FFmpeg/FFprobe required");
+        ScopedEnvironment env{"HEVC_TEST_CUDA_SUPPORT","HEVC_TEST_CUDA_FAIL","HEVC_TEST_CUDA_WAIT",
+            "HEVC_TEST_NVENC_SUPPORT","HEVC_TEST_NVENC_PROBE_FAIL","HEVC_TEST_COMMANDS"};
+        QTemporaryDir dir;
+        const QString input=dir.filePath("cancel.mp4"), dbPath=dir.filePath("history.db"), trace=dir.filePath("commands.jsonl");
+        QVERIFY(ff({"-f","lavfi","-i","testsrc=size=320x240:rate=24","-t","2",
+            "-c:v","libx264","-threads","1","-crf","0","-pix_fmt","yuv420p",input}));
+        const auto original=read(input);
+        const QString mock=dir.filePath(QFileInfo(fixtureProgram()).fileName()); QVERIFY(QFile::copy(fixtureProgram(),mock));
+        qputenv("HEVC_TEST_CUDA_SUPPORT","1"); qputenv("HEVC_TEST_CUDA_WAIT","1");
+        qputenv("HEVC_TEST_NVENC_SUPPORT","1"); qputenv("HEVC_TEST_COMMANDS",trace.toUtf8());
+        auto config=settings(); config["nvenc"]=true; config["ffmpeg"]=mock;
+        TranscodeWorker worker({input},dir.path(),dbPath,config);
+        QSignalSpy done(&worker,&TranscodeWorker::fileDoneSignal);
+        const auto stopWorker=qScopeGuard([&] { worker.stop(); worker.wait(); });
+        worker.start();
+        QTRY_VERIFY_WITH_TIMEOUT(read(trace).contains("-progress"),10000);
+        worker.stop(); QVERIFY(worker.wait(5000)); QCoreApplication::processEvents();
+        QCOMPARE(done.size(),1); QCOMPARE(done.first().at(1).toString(),QString("Cancelled"));
+        int attempts=0;
+        for(const auto &line : read(trace).split('\n')) if(!line.isEmpty()) {
+            const auto args=QJsonDocument::fromJson(line).array().toVariantList();
+            if(args.contains(QString("-progress"))) ++attempts;
+        }
+        QCOMPARE(attempts,1); QCOMPARE(read(input),original);
+        QVERIFY(!QFileInfo::exists(dir.filePath("cancel.mkv")));
+        QVERIFY(!QFileInfo::exists(dir.filePath(".Trash/cancel.mp4")));
+        DatabaseManager db(dbPath); QVERIFY(!db.getProcessedFileInfo(input).found);
+    }
+    void gpuPreprocessingRealScaleAndFrameRate() {
+        if(!qEnvironmentVariableIsSet("HEVC_TEST_CUDA") && !qEnvironmentVariableIsSet("HEVC_TEST_REQUIRE_CUDA"))
+            QSKIP("Set HEVC_TEST_CUDA=1 to run real NVDEC/CUDA preprocessing tests");
+        if(m_ffmpeg.isEmpty()||m_ffprobe.isEmpty()) QFAIL("FFmpeg/FFprobe required for requested CUDA test");
+        auto config=settings(); config["nvenc"]=true;
+        const QString available=VideoEncoder::validate(m_ffmpeg,config);
+        if(!available.isEmpty()) {
+            if(qEnvironmentVariableIsSet("HEVC_TEST_REQUIRE_CUDA")) QFAIL(qPrintable(available));
+            QSKIP(qPrintable(available));
+        }
+        QTemporaryDir dir;
+        const QString base=dir.filePath("base.mp4"),input=dir.filePath("cuda.mp4"),dbPath=dir.filePath("history.db");
+        QVERIFY(ff({"-f","lavfi","-i","testsrc=size=320x240:rate=60","-t","2","-vf","setsar=2/1",
+            "-c:v","libx264","-threads","1","-crf","0","-pix_fmt","yuv420p",base}));
+        QVERIFY(put(dir.filePath("captions.srt"),"1\n00:00:00,000 --> 00:00:01,500\nGPU test captions\n"));
+        QVERIFY(ff({"-i",base,"-f","lavfi","-i","sine=frequency=1000","-i",dir.filePath("captions.srt"),
+            "-t","2","-map","0:v","-map","1:a","-map","2:s","-c:v","copy","-c:a","aac","-c:s","mov_text",input}));
+        const auto original=read(input);
+        const auto sourceMeta=probeMetadata(input,m_ffprobe);
+        const auto planned=VideoPreprocessor::plan(m_ffmpeg,config,sourceMeta,videoGeometry(sourceMeta,true),false,true);
+        if(!planned.accelerated) {
+            if(qEnvironmentVariableIsSet("HEVC_TEST_REQUIRE_CUDA")) QFAIL(qPrintable(planned.reason));
+            QSKIP(qPrintable(planned.reason));
+        }
+        const auto originalAudio=packetTimes(input,"a:0");
+        TranscodeWorker worker({input},dir.path(),dbPath,config);
+        QSignalSpy done(&worker,&TranscodeWorker::fileDoneSignal), logs(&worker,&TranscodeWorker::logSignal);
+        worker.start(); QVERIFY(worker.wait(60000)); QCoreApplication::processEvents();
+        QCOMPARE(done.size(),1);
+        QStringList messages; for(const auto &message : logs) messages.append(message.first().toString());
+        QCOMPARE(done.first().at(1).toString(),QString("Completed"));
+        int encodes=0; bool sawCuda=false;
+        for(const auto &message : messages) if(message.startsWith("Executing:") && message.contains("-progress")) {
+            ++encodes; sawCuda|=message.contains("-hwaccel:v:0 cuda") && message.contains("scale_cuda=");
+        }
+        QVERIFY2(sawCuda,qPrintable(messages.join('\n'))); QCOMPARE(encodes,1);
+        const QString output=dir.filePath("cuda.mkv");
+        const auto meta=probeMetadata(output,m_ffprobe);
+        QVERIFY2(meta.valid,qPrintable(meta.error)); QCOMPARE(meta.vcodec,QString("hevc"));
+        QCOMPARE(meta.width,640); QCOMPARE(meta.height,240); QCOMPARE(meta.fps,30.0);
+        QCOMPARE(meta.sampleAspectRatio,QString("1:1")); QCOMPARE(meta.streams.size(),3); QCOMPARE(meta.acodec,QString("aac"));
+        const auto main=meta.json.value("streams").toArray().first().toObject();
+        QCOMPARE(main.value("profile").toString(),QString("Main 10"));
+        QCOMPARE(main.value("pix_fmt").toString(),QString("yuv420p10le"));
+        const auto frames=packetTimes(output,"v:0"), audio=packetTimes(output,"a:0");
+        QCOMPARE(frames.size(),60); QVERIFY(qAbs(meta.duration-sourceMeta.duration)<0.1);
+        QVERIFY(!frames.isEmpty() && !audio.isEmpty() && !originalAudio.isEmpty());
+        QCOMPARE(audio.size(),originalAudio.size());
+        QVERIFY(qAbs((audio.last()-audio.first())-(originalAudio.last()-originalAudio.first()))<0.01);
+        QCOMPARE(read(dir.filePath(".Trash/cuda.mp4")),original);
+        DatabaseManager db(dbPath); QVERIFY(db.getProcessedFileInfo(output).found);
+    }
     void nvencRealWorkerAndAvisynthCrop() {
         if (!qEnvironmentVariableIsSet("HEVC_TEST_NVENC") && !qEnvironmentVariableIsSet("HEVC_TEST_REQUIRE_NVENC"))
             QSKIP("Set HEVC_TEST_NVENC=1 to run real NVIDIA hardware tests");
@@ -961,29 +1184,47 @@ private slots:
             QVERIFY(QFile::remove(dir.filePath("input.mkv")));
         }
     }
+    void livePreviewReadsGrowingOutput_data() {
+        QTest::addColumn<bool>("seekKeyframes");
+        QTest::newRow("ordinary preview") << false;
+        QTest::newRow("NVENC preview") << true;
+    }
     void livePreviewReadsGrowingOutput() {
+        QFETCH(bool, seekKeyframes);
         if (m_ffmpeg.isEmpty() || m_ffprobe.isEmpty()) QSKIP("FFmpeg/FFprobe required");
         QTemporaryDir dir;
         const QString input=dir.filePath("source.mp4"), output=dir.filePath("growing.mkv");
-        QVERIFY(source(input,8));
+        const int duration = seekKeyframes ? 60 : 8;
+        QVERIFY(source(input, duration));
         auto config=settings(); config["avs_enabled"]=true; config["live_preview"]=true;
+        config["nvenc"] = seekKeyframes;
         TranscodeWorker worker({},dir.path(),dir.filePath("history.db"),config);
         int progress=0; bool previewDuringEncode=false;
         QSignalSpy pictures(&worker,&TranscodeWorker::encodedPreviewSignal);
         connect(&worker,&TranscodeWorker::progressSignal,this,[&](const QString &,int percentage) { progress=percentage; });
-        connect(&worker,&TranscodeWorker::encodedPreviewSignal,this,[&] { if (progress < 90) previewDuringEncode=true; });
-        // Pace a real encoder so previews must decode an incomplete Matroska
-        // file. Flush small clusters to make this short fixture readable early.
-        const auto result=worker.encode(m_ffmpeg,{"-v","error","-nostdin","-y","-re","-i",input,
-            "-an","-vf","crop=160:80:0:8","-c:v","libx265","-preset","ultrafast",
-            "-x265-params","pools=2:log-level=error","-pix_fmt","yuv420p10le",
-            "-flush_packets","1","-cluster_time_limit","1000","-progress","pipe:1",output},8,input,output);
+        connect(&worker, &TranscodeWorker::encodedPreviewSignal, this, [&](const QString &, const QByteArray &, double position) {
+            if (progress < 90 && (!seekKeyframes || position > 0)) previewDuringEncode = true;
+        });
+        // Use software encoding for both rows so the reader can be tested without an NVIDIA GPU.
+        // Pace the writer so the reader must seek within an unfinished Matroska file.
+        QStringList args{"-v","error","-nostdin","-y"};
+        args << (seekKeyframes ? QStringList{"-readrate", "8"} : QStringList{"-re"});
+        args << "-i" << input << "-an" << "-vf" << "crop=160:80:0:8" << "-c:v" << "libx265" << "-preset" << "ultrafast"
+             << "-x265-params" << "pools=2:log-level=error" << "-pix_fmt" << "yuv420p10le"
+             << "-flush_packets" << "1" << "-cluster_time_limit" << "1000" << "-progress" << "pipe:1" << output;
+        const auto result=worker.encode(m_ffmpeg,args,duration,input,output,24);
         QVERIFY2(result.ok,qPrintable(result.error)); QVERIFY(previewDuringEncode);
         for (const auto &picture : pictures)
             QCOMPARE(QImage::fromData(picture.at(1).toByteArray(),"PNG").size(),QSize(240,120));
         QVERIFY(QFile::rename(output,dir.filePath("finished.mkv"))); // Preview reader released the output.
     }
+    void avisynthLivePreviewUsesFilteredOutput_data() {
+        QTest::addColumn<bool>("delayedVideo");
+        QTest::newRow("aligned streams") << false;
+        QTest::newRow("video starts late and finishes before audio") << true;
+    }
     void avisynthLivePreviewUsesFilteredOutput() {
+        QFETCH(bool, delayedVideo);
         if (m_ffmpeg.isEmpty() || m_ffprobe.isEmpty()) QSKIP("FFmpeg/FFprobe required");
         const QString installation=AvisynthPipeline::testInstallation(m_ffmpeg,m_ffprobe,nullptr);
         if (!installation.isEmpty()) {
@@ -991,16 +1232,32 @@ private slots:
             QSKIP(qPrintable(installation));
         }
         QTemporaryDir dir;
-        const QString input=dir.filePath("preview.mp4"); QVERIFY(source(input));
+        const QString input=dir.filePath("preview.mp4");
+        if (delayedVideo) {
+            QVERIFY(ff({"-f","lavfi","-itsoffset","12","-i","testsrc2=size=160x96:rate=24:duration=8",
+                "-f","lavfi","-i","sine=frequency=400:sample_rate=48000:duration=30","-copyts",
+                "-c:v","libx264","-threads","1","-crf","0","-c:a","aac",input}));
+        } else {
+            QVERIFY(source(input));
+        }
         auto config=settings(); config["avs_enabled"]=true; config["avs_filters"]="Crop(0, 8, 0, -8)";
         config["avs_cache_root"]=dir.filePath("cache"); config["live_preview"]=true;
         MainWindow window(nullptr,dir.filePath("history.db"));
         window.m_livePreviewEnabled=true; window.m_isQueueRunning=true; window.m_viewfinderFocusedFile=input;
         TranscodeWorker worker({input},dir.path(),dir.filePath("history.db"),config);
         QSignalSpy pictures(&worker,&TranscodeWorker::encodedPreviewSignal), done(&worker,&TranscodeWorker::fileDoneSignal);
+        QSignalSpy logs(&worker, &TranscodeWorker::logSignal);
         connect(&worker,&TranscodeWorker::encodedPreviewSignal,&window,&MainWindow::onEncodedPreviewReady);
         worker.start(); QVERIFY(worker.wait(60000)); QCoreApplication::processEvents();
         QCOMPARE(done.size(),1); QCOMPARE(done.first().at(1).toString(),QString("Completed"));
+
+        const auto command = std::find_if(logs.cbegin(), logs.cend(), [](const auto &entry) {
+            return entry.constFirst().toString().startsWith("Executing:");
+        });
+        QVERIFY(command != logs.cend());
+        const QString encodeCommand = command->constFirst().toString();
+        QVERIFY(encodeCommand.contains(" -flush_packets 1 "));
+        QVERIFY(encodeCommand.contains(" -cluster_time_limit 1000 "));
         QVERIFY(!pictures.isEmpty()); QCOMPARE(pictures.first().at(0).toString(),input);
         const auto png=pictures.first().at(1).toByteArray();
         const auto image=QImage::fromData(png,"PNG");

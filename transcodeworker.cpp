@@ -3,10 +3,12 @@
 #include "filetransaction.h"
 #include "avisynthpipeline.h"
 #include "videoencoder.h"
+#include "videopreprocessor.h"
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QFile>
 #include <QRegularExpression>
 #include <cmath>
 #include <limits>
@@ -219,10 +221,40 @@ bool TranscodeWorker::processFile(const QString &file, const QString &ffmpeg, co
         ++audioIndex;
     }
     args << "-metadata" << "title=" + source.completeBaseName();
+    // Flush small clusters so live preview can read the growing AviSynth output.
+    if (useAvisynth) {
+        args << "-flush_packets" << "1" << "-cluster_time_limit" << "1000";
+    }
     args << "-progress" << "pipe:1" << "-nostats" << transaction.temporaryPath();
-    emit statusSignal(file, "Processing", "Transcoding...");
     const double outputFps = useAvisynth ? avisynth->filtered.fps : effectiveFps / (halveFps ? 2.0 : 1.0);
-    auto result = encode(ffmpeg, args, meta.duration, file, transaction.temporaryPath(), outputFps);
+    VideoPreprocessor::Plan preprocessing;
+    if (videoEncoded && VideoEncoder::isNvenc(m_settings)) {
+        preprocessing = VideoPreprocessor::plan(ffmpeg, m_settings, meta, geometry,
+            interlaced, halveFps, &m_cancelled);
+        emit logSignal(QString("[%1] NVIDIA preprocessing: %2").arg(source.fileName(), preprocessing.reason));
+    }
+    if (m_cancelled) return fail({});
+    auto encodeArgs = args;
+    if (preprocessing.accelerated) {
+        const int inputIndex = args.indexOf("-i");
+        encodeArgs = args.mid(0, inputIndex) + preprocessing.inputOptions + args.mid(inputIndex);
+        encodeArgs[encodeArgs.indexOf("-filter:v:0") + 1] = preprocessing.filters.join(',');
+    }
+    emit statusSignal(file, "Processing", preprocessing.accelerated
+        ? "Transcoding with GPU decoding and preprocessing..." : "Transcoding...");
+    const double videoStart = useAvisynth ? avisynth->videoStart() : 0.0;
+    auto result = encode(ffmpeg, encodeArgs, meta.duration, file, transaction.temporaryPath(), outputFps, videoStart);
+    if (!result.ok && preprocessing.accelerated && !result.cancelled && !m_cancelled) {
+        emit logSignal(QString("[%1] GPU preprocessing failed; retrying with CPU preprocessing and NVENC. %2")
+            .arg(source.fileName(), result.error));
+        // Both attempts share the destination lock. Close/remove the failed output
+        // before retrying; only a validated final output can update history/files.
+        if (QFileInfo::exists(transaction.temporaryPath()) && !QFile::remove(transaction.temporaryPath()))
+            return fail("Cannot remove failed GPU output before retry; original retained.");
+        emit progressSignal(file, 0, -1, -1, "N/A", 0, 0);
+        emit statusSignal(file, "Processing", "Retrying with CPU preprocessing and NVENC...");
+        result = encode(ffmpeg, args, meta.duration, file, transaction.temporaryPath(), outputFps, videoStart);
+    }
     if (useAvisynth && !avisynth->scriptError().isEmpty()) return fail(avisynth->scriptError());
     if (!result.ok || m_cancelled) return fail(result.error);
     if (useAvisynth) {
@@ -284,7 +316,7 @@ bool TranscodeWorker::processFile(const QString &file, const QString &ffmpeg, co
 }
 
 ProcessResult TranscodeWorker::encode(const QString &ffmpeg, const QStringList &args,
-    double duration, const QString &file, const QString &output, double outputFps)
+    double duration, const QString &file, const QString &output, double outputFps, double videoStart)
 {
     emit logSignal("Executing: " + ffmpeg + " " + args.join(' '));
     QByteArray buffer;
@@ -382,11 +414,24 @@ ProcessResult TranscodeWorker::encode(const QString &ffmpeg, const QStringList &
                         // Read already-filtered output, never launch another AviSynth graph.
                         // Stay behind the muxer's buffered clusters. Own the short-lived
                         // reader here so it closes before validation/rename on Windows.
-                        const double position = qMax(0.0, seconds - 5.0);
-                        const auto frame = runProcess(ffmpeg, {"-v", "error", "-nostdin", "-threads", "1",
-                            "-filter_threads", "1", "-seek_timestamp", "1", "-ss", QString::number(position, 'f', 6),
-                            "-i", output, "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", "scale=iw*sar:ih,scale=240:-1,setsar=1",
-                            "-frames:v", "1", "-threads:v", "1", "-f", "image2pipe", "-c:v", "png", "-"}, &m_cancelled, 2000);
+                        // Mux progress also counts audio and subtitles. Seek within the encoded
+                        // video, and decode its first frame directly when a seek would be premature.
+                        const double videoSeconds = validRate && frames > 0 ? double(frames - 1) / outputFps : 0.0;
+                        const bool seekKeyframes = validRate && VideoEncoder::isNvenc(m_settings);
+                        // Leave room for the next independently decodable frame after a fast seek.
+                        const double previewDelay = 5.0 + (seekKeyframes ? VideoEncoder::NvencGopFrames / outputFps : 0.0);
+                        const double videoPosition = qMax(0.0, videoSeconds - previewDelay);
+                        const double position = qMax(0.0, videoStart + videoPosition);
+                        const bool seek = videoPosition > 0.0;
+                        QStringList frameArgs{"-v", "error", "-nostdin", "-threads", "1", "-filter_threads", "1"};
+                        // Keyframe-only demuxer seeks can scan from the start of an unfinished MKV.
+                        // Let the demuxer jump to any packet, then decode only keyframes.
+                        if (seek && seekKeyframes) frameArgs << "-seek2any" << "1" << "-skip_frame" << "nokey";
+                        if (seek) frameArgs << "-seek_timestamp" << "1" << "-ss" << QString::number(position, 'f', 6);
+                        frameArgs << "-i" << output << "-map" << "0:v:0" << "-an" << "-sn" << "-dn"
+                            << "-vf" << "scale=iw*sar:ih,scale=240:-1,setsar=1"
+                            << "-frames:v" << "1" << "-threads:v" << "1" << "-f" << "image2pipe" << "-c:v" << "png" << "-";
+                        const auto frame = runProcess(ffmpeg, frameArgs, &m_cancelled, 2000);
                         if (frame.ok && !frame.output.isEmpty() && m_livePreviewEnabled) {
                             emit encodedPreviewSignal(file, frame.output, position);
                             previewSent = true;

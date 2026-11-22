@@ -13,6 +13,8 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets Sql)
 add_library(hevc_core STATIC
     videoencoder.h
     videoencoder.cpp
+    videopreprocessor.h
+    videopreprocessor.cpp
     avisynthpipeline.h
     avisynthpipeline.cpp
     databasemanager.h

@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -72,6 +73,35 @@ class PackagingTests(unittest.TestCase):
                 portable.package_portable(build)
         self.assertEqual(archive.read_bytes(), b"previous archive")
         self.assertEqual((stage / "hevc_shrinker.exe").read_bytes(), b"previous")
+
+    @unittest.skipUnless(shutil.which("dpkg-deb") and shutil.which("dpkg"), "dpkg tools required")
+    def test_debian_package_can_be_unpacked_by_dpkg(self):
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            self.skipTest("isolated dpkg unpack requires root or a mapped-root namespace")
+        build = Path("build-release")
+        build.mkdir()
+        executable = build / "hevc_shrinker"
+        executable.write_bytes(b"synthetic executable")
+        executable.chmod(0o755)
+        # Fractional timestamps trigger PAX headers with Python's default format.
+        os.utime(executable, (1700000000.25, 1700000000.25))
+        Path("app_icon.png").write_bytes(b"synthetic icon")
+        with mock.patch.object(linux, "BUILD_DIR", str(build)):
+            self.assertTrue(linux.package_deb())
+        archive = next(Path("dist").glob("*.deb")).resolve()
+        info = subprocess.run(["dpkg-deb", "--info", str(archive)], check=True, capture_output=True, text=True)
+        self.assertIn(f"Version: {linux.VERSION}-1", info.stdout)
+        subprocess.run(["dpkg-deb", "--contents", str(archive)], check=True, capture_output=True)
+        install_root = Path("isolated-install").resolve()
+        database = install_root / "var/lib/dpkg"
+        database.mkdir(parents=True)
+        (database / "status").write_text("")
+        # dpkg's own extractor rejects unsupported PAX headers; listing with tar
+        # alone would miss the bug. No package is configured or installed on host.
+        result = subprocess.run(["dpkg", f"--root={install_root}", "--unpack", str(archive)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((install_root / "usr/bin/hevc_shrinker").read_bytes(), executable.read_bytes())
 
     def test_failed_appimage_does_not_publish_old_artifact(self):
         Path("pack-appimage").mkdir()

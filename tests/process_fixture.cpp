@@ -44,6 +44,14 @@ int main(int argc, char **argv)
         std::puts(" A..... aac");
         return 0;
     }
+    if (args.contains("-filters")) {
+        std::puts(" TS. scale             V->V Scale the input video");
+        if (qEnvironmentVariable("HEVC_TEST_CUDA_SUPPORT") == "lookalike")
+            std::puts(" ... scale_cuda_other  V->V Not the CUDA scaler");
+        else if (qEnvironmentVariableIsSet("HEVC_TEST_CUDA_SUPPORT"))
+            std::puts(" ... scale_cuda        V->V GPU accelerated video resizer");
+        return 0;
+    }
     if (args.contains("lavfi") && args.contains("hevc_nvenc")) {
         if (qEnvironmentVariableIsSet("HEVC_TEST_NVENC_PROBE_FAIL")) {
             std::fprintf(stderr, "Cannot load NVIDIA driver; NVENC initialization failed\n");
@@ -54,6 +62,25 @@ int main(int argc, char **argv)
     if (args.contains("idet")) {
         std::fprintf(stderr, "Multi frame detection: TFF: 0 BFF: 0 Progressive: 360\n");
         return 0;
+    }
+    bool cuda = false;
+    for (const auto &arg : args) cuda |= arg.startsWith("-hwaccel:");
+    if (args.contains("-progress")) {
+        if (cuda && qEnvironmentVariableIsSet("HEVC_TEST_CUDA_WAIT")) {
+            // Cancellation must terminate this attempt without launching a fallback.
+            for (;;) QThread::msleep(20);
+        }
+        if ((cuda && qEnvironmentVariableIsSet("HEVC_TEST_CUDA_FAIL"))
+            || (!cuda && qEnvironmentVariableIsSet("HEVC_TEST_CPU_PREPROCESS_FAIL"))) {
+            QFile partial(args.last());
+            if (partial.open(QIODevice::WriteOnly)) partial.write("incomplete CUDA output");
+            std::fprintf(stderr, "%s\n", cuda ? "Failed to initialize CUDA decoding device" : "CPU preprocessing failed");
+            return 23;
+        }
+        if (!cuda && qEnvironmentVariableIsSet("HEVC_TEST_CUDA_FAIL") && QFileInfo::exists(args.last())) {
+            std::fprintf(stderr, "Partial CUDA output was not removed before retry\n");
+            return 24;
+        }
     }
     const QString fixture = qEnvironmentVariable("HEVC_TEST_ENCODED_FILE");
     const QString gates = qEnvironmentVariable("HEVC_TEST_ENCODE_GATES");
